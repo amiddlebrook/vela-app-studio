@@ -6,7 +6,8 @@
   "compatibility_date": "2026-08-25",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "APP_ORIGIN": "https://vela-control-plane.averymiddlebrook2014.workers.dev"
+    "APP_ORIGIN": "https://vela-control-plane.averymiddlebrook2014.workers.dev",
+    "CLOUDFLARE_ACCOUNT_ID": "07f1b17fd676c14af148ff1d818383a9"
   },
   "durable_objects": {
     "bindings": [{ "name": "BUILDS", "class_name": "BuildCoordinator" }]

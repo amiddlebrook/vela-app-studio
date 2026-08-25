@@ -8,6 +8,7 @@ export interface Env {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   CLOUDFLARE_CLIENT_ID?: string;
+  CLOUDFLARE_ACCOUNT_ID: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
   SESSION_SECRET: string;
@@ -18,6 +19,8 @@ type Provider = 'google' | 'github' | 'cloudflare';
 type OAuthState = { provider: Provider; session_id: string; code_verifier_ciphertext: string; redirect_uri: string; expires_at: string };
 type ProviderToken = { access_token?: string; refresh_token?: string; expires_in?: number; error?: string; error_description?: string };
 type ProviderIdentity = { id: string; email?: string; name?: string };
+type ProjectRecord = { id: string; owner_id: string; name: string; prompt: string };
+type ConnectionToken = { accessToken: string; externalAccountId: string | null };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -91,6 +94,73 @@ async function decrypt(value: string, key: CryptoKey): Promise<string> {
   if (!iv || !ciphertext) throw new Error('Invalid encrypted value');
   const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: toArrayBuffer(base64UrlBytes(iv)) }, key, toArrayBuffer(base64UrlBytes(ciphertext)));
   return decoder.decode(plaintext);
+}
+
+function safeSlug(value: string, fallback: string): string {
+  const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 42);
+  return slug || fallback;
+}
+
+function messageFromError(error: unknown): string {
+  return error instanceof Error ? error.message.slice(0, 500) : 'Unknown build error';
+}
+
+async function connectedToken(env: Env, ownerId: string, provider: Exclude<Provider, 'google'>): Promise<ConnectionToken> {
+  const connection = await env.DB.prepare('SELECT access_token_ciphertext, external_account_id FROM connections WHERE owner_id = ? AND provider = ? AND status = ?')
+    .bind(ownerId, provider, 'connected')
+    .first<{ access_token_ciphertext: string | null; external_account_id: string | null }>();
+  if (!connection?.access_token_ciphertext) throw new Error(`${provider} connection is missing or expired`);
+  return {
+    accessToken: JSON.parse(await decrypt(connection.access_token_ciphertext, env.TOKEN_ENCRYPTION_KEY)) as string,
+    externalAccountId: connection.external_account_id,
+  };
+}
+
+async function githubRequest<T>(token: string, path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(`https://api.github.com${path}`, {
+    ...init,
+    headers: {
+      accept: 'application/vnd.github+json',
+      authorization: `Bearer ${token}`,
+      'x-github-api-version': '2022-11-28',
+      ...init.headers,
+    },
+  });
+  const payload = await response.json<unknown>();
+  if (!response.ok) throw new Error(`GitHub request failed (${response.status}): ${typeof payload === 'object' && payload && 'message' in payload ? String(payload.message) : 'unknown error'}`);
+  return payload as T;
+}
+
+async function putGithubFile(token: string, repository: string, path: string, content: string, message: string): Promise<void> {
+  await githubRequest(token, `/repos/${repository}/contents/${path}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message, content: base64Url(encoder.encode(content)) }),
+  });
+}
+
+function standaloneWorkerSource(name: string, prompt: string): string {
+  return `const appName = ${JSON.stringify(name)};
+const appPrompt = ${JSON.stringify(prompt)};
+const escapeHtml = (value) => String(value).replace(/[&<>\"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;' }[character]));
+export default {
+  async fetch() {
+    return new Response('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + escapeHtml(appName) + '</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#080a13;color:#f4f5ff;font:16px system-ui}main{max-width:680px;padding:48px}h1{font-size:clamp(40px,8vw,84px);line-height:.9;margin:0 0 24px}p{color:#b7c1e8;line-height:1.65}</style><main><p>Standalone Cloudflare app</p><h1>' + escapeHtml(appName) + '</h1><p>' + escapeHtml(appPrompt) + '</p></main></html>', { headers: { 'content-type': 'text/html; charset=utf-8' } });
+  }
+};
+`;
+}
+
+async function deployStandaloneWorker(token: string, accountId: string, workerName: string, source: string): Promise<void> {
+  const form = new FormData();
+  form.set('metadata', JSON.stringify({ main_module: 'worker.mjs', compatibility_date: '2026-08-25' }));
+  form.set('worker.mjs', new Blob([source], { type: 'application/javascript+module' }), 'worker.mjs');
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(workerName)}`, {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!response.ok) throw new Error(`Cloudflare Worker deployment failed (${response.status})`);
 }
 
 function securityHeaders(headers = new Headers()): Headers {
@@ -210,6 +280,42 @@ async function projectForOwner(env: Env, id: string, ownerId: string) {
 
 async function recordEvent(env: Env, projectId: string, kind: string, detail: string): Promise<void> {
   await env.DB.prepare('INSERT INTO build_events (id, project_id, kind, detail, created_at) VALUES (?, ?, ?, ?, ?)').bind(crypto.randomUUID(), projectId, kind, detail, new Date().toISOString()).run();
+}
+
+async function buildStandaloneApp(env: Env, projectId: string): Promise<void> {
+  const project = await env.DB.prepare('SELECT id, owner_id, name, prompt FROM projects WHERE id = ?').bind(projectId).first<ProjectRecord>();
+  if (!project) throw new Error('Project no longer exists');
+  if (!env.CLOUDFLARE_ACCOUNT_ID) throw new Error('Cloudflare account is not configured on the control plane');
+
+  const [github, cloudflare] = await Promise.all([
+    connectedToken(env, project.owner_id, 'github'),
+    connectedToken(env, project.owner_id, 'cloudflare'),
+  ]);
+  const suffix = project.id.replaceAll('-', '').slice(0, 8);
+  const repositoryName = `${safeSlug(project.name, 'app')}-${suffix}`;
+  const workerName = `vela-${safeSlug(project.name, 'app')}-${suffix}`;
+  const now = new Date().toISOString();
+
+  await env.DB.prepare('UPDATE projects SET status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind('creating_repository', workerName, now, project.id).run();
+  await recordEvent(env, project.id, 'repository_started', `Creating private GitHub repository ${repositoryName}`);
+  const githubUser = await githubRequest<{ login: string }>(github.accessToken, '/user');
+  const repository = await githubRequest<{ full_name: string }>(github.accessToken, '/user/repos', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: repositoryName, description: project.prompt.slice(0, 160), private: true, has_issues: true, has_projects: true }),
+  });
+
+  const source = standaloneWorkerSource(project.name, project.prompt);
+  const wrangler = JSON.stringify({ name: workerName, main: 'src/worker.mjs', compatibility_date: '2026-08-25' }, null, 2) + '\n';
+  await putGithubFile(github.accessToken, repository.full_name, 'README.md', `# ${project.name}\n\n${project.prompt}\n\nThis is a standalone Cloudflare Worker created by Vela.\n`, 'Add project README');
+  await putGithubFile(github.accessToken, repository.full_name, 'src/worker.mjs', source, 'Add standalone Worker');
+  await putGithubFile(github.accessToken, repository.full_name, 'wrangler.json', wrangler, 'Add Worker configuration');
+  await env.DB.prepare('UPDATE projects SET github_repository = ?, status = ?, updated_at = ? WHERE id = ?').bind(repository.full_name, 'deploying', new Date().toISOString(), project.id).run();
+  await recordEvent(env, project.id, 'repository_created', `Private repository ${repository.full_name} created`);
+
+  await deployStandaloneWorker(cloudflare.accessToken, env.CLOUDFLARE_ACCOUNT_ID, workerName, source);
+  await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('live', new Date().toISOString(), project.id).run();
+  await recordEvent(env, project.id, 'deployment_complete', `Worker deployed as ${workerName}`);
 }
 
 async function projectsWithFeatures(env: Env, ownerId: string) {
@@ -354,9 +460,18 @@ export default {
 
   async queue(batch: MessageBatch<{ projectId: string; prompt: string }>, env: Env): Promise<void> {
     for (const message of batch.messages) {
-      const now = new Date().toISOString();
-      await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('queued', now, message.body.projectId).run();
-      await recordEvent(env, message.body.projectId, 'build_queued', 'Queue consumer accepted the build job');
+      try {
+        await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('building', new Date().toISOString(), message.body.projectId).run();
+        await recordEvent(env, message.body.projectId, 'build_started', 'Queue consumer started the standalone app build');
+        await buildStandaloneApp(env, message.body.projectId);
+        message.ack();
+      } catch (error) {
+        const detail = messageFromError(error);
+        await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('failed', new Date().toISOString(), message.body.projectId).run();
+        await recordEvent(env, message.body.projectId, 'build_failed', detail);
+        console.error(JSON.stringify({ event: 'build_failed', projectId: message.body.projectId, message: detail }));
+        message.ack();
+      }
     }
   },
 };
