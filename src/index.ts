@@ -371,7 +371,11 @@ export default {
     if (callbackProvider && request.method === 'GET') {
       const state = url.searchParams.get('state');
       const code = url.searchParams.get('code');
-      if (!state || !code || url.searchParams.get('error')) return json({ error: 'Authorization was not completed' }, { status: 400 });
+      const authorizationError = url.searchParams.get('error');
+      if (!state || !code || authorizationError) return json({
+        error: 'Authorization was not completed',
+        reason: url.searchParams.get('error_description') ?? authorizationError ?? 'Missing authorization code or state',
+      }, { status: 400 });
       const stateHash = await sha256(state);
       const stored = await env.DB.prepare('SELECT provider, session_id, code_verifier_ciphertext, redirect_uri, expires_at FROM oauth_states WHERE state_hash = ?').bind(stateHash).first<OAuthState>();
       await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ?').bind(stateHash).run();
@@ -392,7 +396,7 @@ export default {
       } catch (error) {
         const reason = messageFromError(error);
         console.error(JSON.stringify({ event: 'oauth_callback_failed', provider: callbackProvider, message: reason }));
-        return json({ error: 'Connection could not be completed. Start again.' }, { status: 502 });
+        return json({ error: 'Connection could not be completed. Start again.', reason }, { status: 502 });
       }
     }
 
