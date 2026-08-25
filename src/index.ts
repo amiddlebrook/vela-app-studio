@@ -8,6 +8,7 @@ export interface Env {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   CLOUDFLARE_CLIENT_ID?: string;
+  CLOUDFLARE_CLIENT_SECRET?: string;
   CLOUDFLARE_ACCOUNT_ID: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
@@ -204,6 +205,7 @@ async function exchangeToken(provider: Provider, code: string, verifier: string,
   }
   if (provider === 'cloudflare') {
     form.set('grant_type', 'authorization_code');
+    if (env.CLOUDFLARE_CLIENT_SECRET) form.set('client_secret', env.CLOUDFLARE_CLIENT_SECRET);
   }
   const endpoint = provider === 'google'
     ? 'https://oauth2.googleapis.com/token'
