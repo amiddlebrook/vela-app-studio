@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "vela-control-plane",
+  "compatibility_date": "2026-08-25",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vela-control-plane",
+      "database_id": "c5056c44-8696-4927-927d-0c16b1d18bfe",
+      "migrations_dir": "./migrations"
+    }
+  ]
+}
