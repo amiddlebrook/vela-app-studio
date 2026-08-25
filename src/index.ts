@@ -5,6 +5,8 @@ export interface Env {
   BUILDS: DurableObjectNamespace<BuildCoordinator>;
   BUILD_JOBS: Queue<{ projectId: string; prompt: string }>;
   APP_ORIGIN: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
   CLOUDFLARE_CLIENT_ID?: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
@@ -12,9 +14,10 @@ export interface Env {
   TOKEN_ENCRYPTION_KEY: CryptoKey;
 }
 
-type Provider = 'github' | 'cloudflare';
+type Provider = 'google' | 'github' | 'cloudflare';
 type OAuthState = { provider: Provider; session_id: string; code_verifier_ciphertext: string; redirect_uri: string; expires_at: string };
 type ProviderToken = { access_token?: string; refresh_token?: string; expires_in?: number; error?: string; error_description?: string };
+type ProviderIdentity = { id: string; email?: string; name?: string };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -61,7 +64,10 @@ async function hmac(value: string, secret: string): Promise<string> {
 }
 
 async function issueSession(secret: string): Promise<{ id: string; cookie: string }> {
-  const id = randomToken();
+  return issueSessionForId(randomToken(), secret);
+}
+
+async function issueSessionForId(id: string, secret: string): Promise<{ id: string; cookie: string }> {
   const signature = await hmac(id, secret);
   return { id, cookie: `${SESSION_COOKIE}=${id}.${signature}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000` };
 }
@@ -100,8 +106,8 @@ function json(value: unknown, init: ResponseInit = {}): Response {
 }
 
 function providerFromPath(pathname: string, suffix: 'start' | 'callback'): Provider | null {
-  const provider = pathname.match(new RegExp(`^/auth/(github|cloudflare)/${suffix}$`))?.[1];
-  return provider === 'github' || provider === 'cloudflare' ? provider : null;
+  const provider = pathname.match(new RegExp(`^/auth/(google|github|cloudflare)/${suffix}$`))?.[1];
+  return provider === 'google' || provider === 'github' || provider === 'cloudflare' ? provider : null;
 }
 
 function callbackUrl(env: Env, provider: Provider): string {
@@ -109,6 +115,7 @@ function callbackUrl(env: Env, provider: Provider): string {
 }
 
 function configuredClientId(env: Env, provider: Provider): string | undefined {
+  if (provider === 'google') return env.GOOGLE_CLIENT_ID;
   return provider === 'github' ? env.GITHUB_CLIENT_ID : env.CLOUDFLARE_CLIENT_ID;
 }
 
@@ -116,11 +123,21 @@ async function exchangeToken(provider: Provider, code: string, verifier: string,
   const clientId = configuredClientId(env, provider);
   if (!clientId) throw new Error(`${provider} OAuth is not configured`);
   const form = new URLSearchParams({ client_id: clientId, code, redirect_uri: redirectUri, code_verifier: verifier });
+  if (provider === 'google') {
+    if (!env.GOOGLE_CLIENT_SECRET) throw new Error('google OAuth is not configured');
+    form.set('client_secret', env.GOOGLE_CLIENT_SECRET);
+    form.set('grant_type', 'authorization_code');
+  }
   if (provider === 'github') {
     if (!env.GITHUB_CLIENT_SECRET) throw new Error('github OAuth is not configured');
     form.set('client_secret', env.GITHUB_CLIENT_SECRET);
   }
-  const response = await fetch(provider === 'github' ? 'https://github.com/login/oauth/access_token' : 'https://dash.cloudflare.com/oauth2/token', {
+  const endpoint = provider === 'google'
+    ? 'https://oauth2.googleapis.com/token'
+    : provider === 'github'
+      ? 'https://github.com/login/oauth/access_token'
+      : 'https://dash.cloudflare.com/oauth2/token';
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
     body: form,
@@ -130,21 +147,28 @@ async function exchangeToken(provider: Provider, code: string, verifier: string,
   return token;
 }
 
-async function externalAccount(provider: Provider, accessToken: string): Promise<string> {
-  const response = await fetch(provider === 'github' ? 'https://api.github.com/user' : 'https://dash.cloudflare.com/oauth2/userinfo', {
+async function providerIdentity(provider: Provider, accessToken: string): Promise<ProviderIdentity> {
+  const endpoint = provider === 'google'
+    ? 'https://openidconnect.googleapis.com/v1/userinfo'
+    : provider === 'github'
+      ? 'https://api.github.com/user'
+      : 'https://dash.cloudflare.com/oauth2/userinfo';
+  const response = await fetch(endpoint, {
     headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' },
   });
   if (!response.ok) throw new Error('Could not verify provider account');
-  const identity = await response.json<{ id?: number | string; sub?: string }>();
+  const identity = await response.json<{ id?: number | string; sub?: string; email?: string; name?: string; login?: string }>();
   const id = identity.id ?? identity.sub;
   if (!id) throw new Error('Provider did not return an account identifier');
-  return String(id);
+  return { id: String(id), email: identity.email, name: identity.name ?? identity.login };
 }
 
-function successPage(provider: Provider): Response {
-  const label = provider === 'github' ? 'GitHub' : 'Cloudflare';
+function successPage(provider: Provider, cookie?: string): Response {
+  const label = provider === 'google' ? 'Google' : provider === 'github' ? 'GitHub' : 'Cloudflare';
+  const headers = securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' }));
+  if (cookie) headers.append('set-cookie', cookie);
   return new Response(`<!doctype html><html><head><meta charset="utf-8"><title>Connection complete</title></head><body><main><h1>${label} connected</h1><p>You can return to the app and continue.</p></main></body></html>`, {
-    headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })),
+    headers,
   });
 }
 
@@ -158,9 +182,26 @@ function dashboardV2(): Response {
   return new Response(body, { headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })) });
 }
 
+function dashboardV3(): Response {
+  const body = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vela Control Plane</title><style>body{margin:0;background:#080a13;color:#f1f3ff;font:15px system-ui,sans-serif}main{max-width:1050px;margin:auto;padding:48px 22px}.eyebrow{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:#8da9ff}h1{font-size:clamp(44px,7vw,78px);line-height:.88;margin:13px 0 35px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.card{border:1px solid #2d3658;border-radius:20px;background:linear-gradient(145deg,#151b31,#0d101d);padding:20px}.wide{grid-column:1/-1}h2{margin:0 0 9px;font-size:18px}.muted{color:#9da8cc}.state{color:#9ee6c5;min-height:20px}button{border:0;border-radius:999px;background:#b7c8ff;color:#091126;padding:10px 14px;font-weight:750;cursor:pointer}button.alt{background:#232c4b;color:#f1f3ff}input,textarea{width:100%;box-sizing:border-box;border:1px solid #374363;border-radius:12px;background:#090c16;color:#f1f3ff;padding:12px;margin:6px 0;font:inherit}.project{border-top:1px solid #2d3658;padding:13px 0}.project:first-child{border-top:0}.tag{display:inline-block;border:1px solid #42507b;border-radius:99px;padding:4px 8px;margin:8px 6px 0 0;font-size:11px}.off{opacity:.4;text-decoration:line-through}.status{color:#9ee6c5;min-height:20px}@media(max-width:750px){.grid{grid-template-columns:1fr}}</style></head><body><main><div class="eyebrow">Your app operating system</div><h1>Build. Ship.<br>Control.</h1><section class="grid"><article class="card"><h2>Google</h2><p class="muted">Sign in and keep your portfolio attached to you.</p><p class="state" id="google">Checking…</p><button onclick="location.href='/auth/google/start'">Sign in with Google</button></article><article class="card"><h2>GitHub</h2><p class="muted">Create a separate private repository for every app.</p><p class="state" id="github">Checking…</p><button class="alt" onclick="location.href='/auth/github/start'">Connect GitHub</button></article><article class="card"><h2>Cloudflare</h2><p class="muted">Deploy and manage the generated app infrastructure.</p><p class="state" id="cloudflare">Checking…</p><button class="alt" onclick="location.href='/auth/cloudflare/start'">Connect Cloudflare</button></article><article class="card wide"><h2>Create a standalone app</h2><input id="name" placeholder="Project name"><textarea id="prompt" rows="5" placeholder="Describe what you want to create…"></textarea><button onclick="createProject()">Create project</button><p class="status" id="status"></p></article><article class="card wide"><h2>Portfolio</h2><div id="projects" class="muted">Loading…</div></article></section></main><script>const q=s=>document.querySelector(s);const esc=v=>String(v).replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));async function api(p,o){let r=await fetch(p,o),d=await r.json();if(!r.ok)throw Error(d.error||'Request failed');return d}async function refresh(){try{await api('/session',{method:'POST'});let[c,p]=await Promise.all([api('/connections'),api('/projects')]);let s=new Set(c.connections.map(x=>x.provider));['google','github','cloudflare'].forEach(x=>q('#'+x).textContent=s.has(x)?'Connected':'Not connected');q('#projects').innerHTML=p.projects.length?p.projects.map(x=>'<div class="project"><b>'+esc(x.name)+'</b> <span class="muted">'+esc(x.status)+'</span><div>'+x.features.map(f=>'<span class="tag '+(f.enabled?'':'off')+'">'+esc(f.feature)+'</span>').join('')+'</div></div>').join(''):'No projects yet.'}catch(e){q('#status').textContent=e.message}}async function createProject(){try{let d=await api('/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:q('#name').value,prompt:q('#prompt').value})});q('#status').textContent='Created '+d.project.name;refresh()}catch(e){q('#status').textContent=e.message}}refresh()</script></body></html>`;
+  return new Response(body, { headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })) });
+}
+
 async function connectionProviders(env: Env, ownerId: string): Promise<Set<string>> {
   const result = await env.DB.prepare('SELECT provider FROM connections WHERE owner_id = ? AND status = ?').bind(ownerId, 'connected').all<{ provider: string }>();
   return new Set(result.results.map((connection) => connection.provider));
+}
+
+async function completeGoogleLogin(env: Env, anonymousOwnerId: string, identity: ProviderIdentity): Promise<{ ownerId: string; cookie: string }> {
+  const ownerId = `google:${identity.id}`;
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare('INSERT INTO users (id, google_subject, email, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(google_subject) DO UPDATE SET email = excluded.email, name = excluded.name, updated_at = excluded.updated_at').bind(ownerId, identity.id, identity.email ?? null, identity.name ?? null, now, now),
+    env.DB.prepare('UPDATE projects SET owner_id = ? WHERE owner_id = ?').bind(ownerId, anonymousOwnerId),
+    env.DB.prepare('UPDATE connections SET owner_id = ? WHERE owner_id = ?').bind(ownerId, anonymousOwnerId),
+  ]);
+  const session = await issueSessionForId(ownerId, env.SESSION_SECRET);
+  return { ownerId, cookie: session.cookie };
 }
 
 async function projectForOwner(env: Env, id: string, ownerId: string) {
@@ -181,7 +222,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true, service: 'vela-control-plane' });
-    if (url.pathname === '/' && request.method === 'GET') return dashboardV2();
+    if (url.pathname === '/' && request.method === 'GET') return dashboardV3();
 
     if (url.pathname === '/session' && request.method === 'POST') {
       const existing = await readSession(request, env.SESSION_SECRET);
@@ -204,9 +245,14 @@ export default {
       await env.DB.prepare('INSERT INTO oauth_states (state_hash, provider, session_id, code_verifier_ciphertext, redirect_uri, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .bind(await sha256(state), startProvider, session.id, await encrypt(verifier, env.TOKEN_ENCRYPTION_KEY), redirectUri, expiresAt, new Date().toISOString()).run();
       const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', state, code_challenge: await sha256(verifier), code_challenge_method: 'S256' });
+      if (startProvider === 'google') params.set('scope', 'openid email profile');
       if (startProvider === 'github') params.set('scope', 'repo workflow read:user');
       if (startProvider === 'cloudflare') params.set('scope', 'workers-platform.read workers-platform.write');
-      const endpoint = startProvider === 'github' ? 'https://github.com/login/oauth/authorize' : 'https://dash.cloudflare.com/oauth2/auth';
+      const endpoint = startProvider === 'google'
+        ? 'https://accounts.google.com/o/oauth2/v2/auth'
+        : startProvider === 'github'
+          ? 'https://github.com/login/oauth/authorize'
+          : 'https://dash.cloudflare.com/oauth2/auth';
       const headers = securityHeaders(new Headers({ location: `${endpoint}?${params}` }));
       if (session.cookie) headers.append('set-cookie', session.cookie);
       return new Response(null, { status: 302, headers });
@@ -223,12 +269,14 @@ export default {
       if (!stored || stored.provider !== callbackProvider || Date.parse(stored.expires_at) <= Date.now()) return json({ error: 'This connection request has expired. Start again.' }, { status: 400 });
       try {
         const token = await exchangeToken(callbackProvider, code, await decrypt(stored.code_verifier_ciphertext, env.TOKEN_ENCRYPTION_KEY), stored.redirect_uri, env);
-        const externalId = await externalAccount(callbackProvider, token.access_token!);
+        const identity = await providerIdentity(callbackProvider, token.access_token!);
+        const login = callbackProvider === 'google' ? await completeGoogleLogin(env, stored.session_id, identity) : null;
+        const ownerId = login?.ownerId ?? stored.session_id;
         const now = new Date().toISOString();
         const expiresAt = token.expires_in ? new Date(Date.now() + token.expires_in * 1000).toISOString() : null;
         await env.DB.prepare(`INSERT INTO connections (id, owner_id, provider, external_account_id, access_token_ciphertext, refresh_token_ciphertext, token_expires_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'connected', ?, ?) ON CONFLICT(owner_id, provider) DO UPDATE SET external_account_id = excluded.external_account_id, access_token_ciphertext = excluded.access_token_ciphertext, refresh_token_ciphertext = excluded.refresh_token_ciphertext, token_expires_at = excluded.token_expires_at, status = 'connected', updated_at = excluded.updated_at`)
-          .bind(crypto.randomUUID(), stored.session_id, callbackProvider, externalId, await encrypt(token.access_token, env.TOKEN_ENCRYPTION_KEY), token.refresh_token ? await encrypt(token.refresh_token, env.TOKEN_ENCRYPTION_KEY) : null, expiresAt, now, now).run();
-        return successPage(callbackProvider);
+          .bind(crypto.randomUUID(), ownerId, callbackProvider, identity.id, await encrypt(token.access_token, env.TOKEN_ENCRYPTION_KEY), token.refresh_token ? await encrypt(token.refresh_token, env.TOKEN_ENCRYPTION_KEY) : null, expiresAt, now, now).run();
+        return successPage(callbackProvider, login?.cookie);
       } catch (error) {
         console.error(JSON.stringify({ event: 'oauth_callback_failed', provider: callbackProvider, message: error instanceof Error ? error.message : 'unknown' }));
         return json({ error: 'Connection could not be completed. Start again.' }, { status: 502 });
