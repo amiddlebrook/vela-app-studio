@@ -153,16 +153,42 @@ function dashboardPage(): Response {
   return new Response(body, { headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })) });
 }
 
+function dashboardV2(): Response {
+  const body = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vela Control Plane</title><style>:root{color-scheme:dark;--ink:#ebedff;--muted:#9da6c8;--line:#262d4b;--card:#11172a;--blue:#91adff;--mint:#92e8c4;--bg:#070914}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% -20%,#25356d55,transparent 42%),var(--bg);color:var(--ink);font:15px ui-sans-serif,system-ui,sans-serif}main{max-width:1160px;margin:auto;padding:38px 22px 80px}.eyebrow{font-size:11px;color:var(--blue);letter-spacing:.16em;text-transform:uppercase}header{display:flex;justify-content:space-between;gap:22px;align-items:end;border-bottom:1px solid var(--line);padding-bottom:28px}h1{font-size:clamp(40px,6vw,74px);line-height:.9;margin:12px 0 0}.pill{border:1px solid #405184;border-radius:999px;padding:8px 12px;color:var(--mint);white-space:nowrap}.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:18px;margin-top:18px}.card{background:linear-gradient(145deg,#141b31,#0d1020);border:1px solid var(--line);border-radius:20px;padding:22px}.wide{grid-column:1/-1}h2{font-size:18px;margin:0 0 14px}.connect{display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-top:1px solid var(--line)}.connect:first-of-type{border-top:0}.state{color:var(--muted)}button{border:0;border-radius:999px;background:var(--blue);color:#0a1025;padding:10px 14px;font-weight:750;cursor:pointer}button.secondary{background:#212a49;color:var(--ink)}button.tiny{padding:6px 10px;font-size:12px}input,textarea{width:100%;color:var(--ink);background:#090c18;border:1px solid #303a5e;border-radius:12px;padding:12px;margin-bottom:9px;font:inherit}textarea{resize:vertical}.project{border-top:1px solid var(--line);padding:16px 0}.project:first-child{border-top:0;padding-top:0}.row{display:flex;gap:10px;justify-content:space-between;align-items:center}.name{font-weight:750}.meta,small{color:var(--muted);font-size:12px}.tags{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.tag{border:1px solid #3d4971;border-radius:999px;color:#bdc8ef;background:#171d34;padding:5px 8px;font-size:11px}.tag.off{opacity:.4;text-decoration:line-through}.empty{color:var(--muted);padding:14px 0}.status{min-height:20px;color:var(--mint);margin:4px 0 0}@media(max-width:760px){header{align-items:start;flex-direction:column}.grid{grid-template-columns:1fr}}</style></head><body><main><header><div><div class="eyebrow">Cloudflare-native control plane</div><h1>Build. Ship.<br>Control.</h1></div><div class="pill" id="session">Preparing workspace</div></header><section class="grid"><article class="card"><h2>Create a standalone app</h2><input id="name" maxlength="80" placeholder="Project name"><textarea id="prompt" rows="5" maxlength="4000" placeholder="Describe the app, audience, and outcome…"></textarea><button onclick="createProject()">Create project</button><p class="status" id="status"></p><small>You can test planning, portfolio, features, and usage before connections are configured.</small></article><article class="card"><h2>Connections</h2><div class="connect"><div><strong>GitHub</strong><div class="state" id="github">Checking…</div></div><button class="secondary tiny" onclick="location.href='/auth/github/start'">Connect</button></div><div class="connect"><div><strong>Cloudflare</strong><div class="state" id="cloudflare">Checking…</div></div><button class="secondary tiny" onclick="location.href='/auth/cloudflare/start'">Connect</button></div></article><article class="card wide"><div class="row"><h2>Your portfolio</h2><span class="meta" id="usage">$0 tracked</span></div><div id="projects" class="empty">Loading projects…</div></article></section></main><script>let projects=[];const $=s=>document.querySelector(s);const esc=s=>String(s).replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));async function api(path,options){let r=await fetch(path,options),d=await r.json();if(!r.ok)throw new Error(d.error||'Request failed');return d}async function boot(){try{await api('/session',{method:'POST'})}catch(e){$('#status').textContent=e.message}await refresh()}async function refresh(){try{let [c,p,u]=await Promise.all([api('/connections'),api('/projects'),api('/usage')]);let connected=new Set(c.connections.map(x=>x.provider));$('#github').textContent=connected.has('github')?'Connected':'Not connected';$('#cloudflare').textContent=connected.has('cloudflare')?'Connected':'Not connected';$('#session').textContent='Workspace ready';projects=p.projects;$('#usage').textContent='$'+(u.estimated_cost_cents/100).toFixed(2)+' tracked';render()}catch(e){$('#status').textContent=e.message}}function render(){let root=$('#projects');if(!projects.length){root.className='empty';root.textContent='No projects yet. Create one from a prompt.';return}root.className='';root.innerHTML=projects.map(p=>'<article class="project"><div class="row"><div><div class="name">'+esc(p.name)+'</div><div class="meta">'+esc(p.status)+' · '+new Date(p.updated_at).toLocaleString()+'</div></div><button class="secondary tiny" onclick="build(\''+p.id+'\')">Run build</button></div><div class="tags">'+p.features.map(f=>'<button class="tag '+(f.enabled?'':'off')+'" onclick="toggle(\''+p.id+'\',\''+f.feature+'\','+(f.enabled?0:1)+')">'+esc(f.feature)+'</button>').join('')+'</div></article>').join('')}async function createProject(){let status=$('#status');status.textContent='Creating…';try{let d=await api('/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#name').value,prompt:$('#prompt').value})});status.textContent='Created: '+d.project.name;$('#name').value='';$('#prompt').value='';await refresh()}catch(e){status.textContent=e.message}}async function toggle(id,feature,enabled){try{await api('/projects/'+id+'/features/'+encodeURIComponent(feature),{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({enabled:!!enabled})});await refresh()}catch(e){$('#status').textContent=e.message}}async function build(id){try{let d=await api('/projects/'+id+'/build',{method:'POST'});$('#status').textContent=d.status==='needs_connections'?'Connect GitHub and Cloudflare to run this build.':'Build queued.';await refresh()}catch(e){$('#status').textContent=e.message}}boot()</script></body></html>`;
+  return new Response(body, { headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })) });
+}
+
 async function connectionProviders(env: Env, ownerId: string): Promise<Set<string>> {
   const result = await env.DB.prepare('SELECT provider FROM connections WHERE owner_id = ? AND status = ?').bind(ownerId, 'connected').all<{ provider: string }>();
   return new Set(result.results.map((connection) => connection.provider));
+}
+
+async function projectForOwner(env: Env, id: string, ownerId: string) {
+  return env.DB.prepare('SELECT id, name, prompt, status, created_at, updated_at FROM projects WHERE id = ? AND owner_id = ?').bind(id, ownerId).first<{ id: string; name: string; prompt: string; status: string; created_at: string; updated_at: string }>();
+}
+
+async function recordEvent(env: Env, projectId: string, kind: string, detail: string): Promise<void> {
+  await env.DB.prepare('INSERT INTO build_events (id, project_id, kind, detail, created_at) VALUES (?, ?, ?, ?, ?)').bind(crypto.randomUUID(), projectId, kind, detail, new Date().toISOString()).run();
+}
+
+async function projectsWithFeatures(env: Env, ownerId: string) {
+  const projects = await env.DB.prepare('SELECT id, name, prompt, github_repository, worker_name, status, created_at, updated_at FROM projects WHERE owner_id = ? ORDER BY updated_at DESC').bind(ownerId).all<Record<string, string | null>>();
+  const features = await env.DB.prepare('SELECT project_id, feature, enabled, updated_at FROM project_features WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?) ORDER BY feature').bind(ownerId).all<{ project_id: string; feature: string; enabled: number; updated_at: string }>();
+  return projects.results.map((project) => ({ ...project, features: features.results.filter((feature) => feature.project_id === project.id).map((feature) => ({ ...feature, enabled: Boolean(feature.enabled) })) }));
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true, service: 'vela-control-plane' });
-    if (url.pathname === '/' && request.method === 'GET') return dashboardPage();
+    if (url.pathname === '/' && request.method === 'GET') return dashboardV2();
+
+    if (url.pathname === '/session' && request.method === 'POST') {
+      const existing = await readSession(request, env.SESSION_SECRET);
+      if (existing) return json({ ready: true });
+      const session = await issueSession(env.SESSION_SECRET);
+      return json({ ready: true }, { headers: { 'set-cookie': session.cookie } });
+    }
 
     const startProvider = providerFromPath(url.pathname, 'start');
     if (startProvider && request.method === 'GET') {
@@ -216,17 +242,63 @@ export default {
       return json({ connections: connections.results });
     }
 
+    if (url.pathname === '/projects' && request.method === 'GET') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      return json({ projects: await projectsWithFeatures(env, sessionId) });
+    }
+
+    if (url.pathname === '/usage' && request.method === 'GET') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const total = await env.DB.prepare('SELECT COALESCE(SUM(estimated_cost_cents), 0) AS estimated_cost_cents FROM usage_events WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?)').bind(sessionId).first<{ estimated_cost_cents: number }>();
+      return json({ estimated_cost_cents: total?.estimated_cost_cents ?? 0 });
+    }
+
     if (url.pathname === '/projects' && request.method === 'POST') {
-      if (!sessionId) return json({ error: 'Connect GitHub and Cloudflare before creating a project.' }, { status: 401 });
-      const providers = await connectionProviders(env, sessionId);
-      if (!providers.has('github') || !providers.has('cloudflare')) return json({ error: 'Both GitHub and Cloudflare connections are required.' }, { status: 409 });
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
       const body = await request.json<{ name?: string; prompt?: string }>();
       if (!body.name || !body.prompt) return json({ error: 'name and prompt are required' }, { status: 400 });
       const id = crypto.randomUUID();
       const now = new Date().toISOString();
-      await env.DB.prepare('INSERT INTO projects (id, owner_id, name, prompt, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, sessionId, body.name, body.prompt, 'planning', now, now).run();
-      await env.BUILD_JOBS.send({ projectId: id, prompt: body.prompt });
-      return json(await env.BUILDS.getByName(id).plan(id, body.prompt), { status: 201 });
+      const providers = await connectionProviders(env, sessionId);
+      const canBuild = providers.has('github') && providers.has('cloudflare');
+      const status = canBuild ? 'planning' : 'needs_connections';
+      await env.DB.prepare('INSERT INTO projects (id, owner_id, name, prompt, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, sessionId, body.name.trim().slice(0, 80), body.prompt.trim().slice(0, 4000), status, now, now).run();
+      await env.DB.batch(['workers', 'd1', 'r2', 'queues'].map((feature) => env.DB.prepare('INSERT INTO project_features (project_id, feature, enabled, updated_at) VALUES (?, ?, 1, ?)').bind(id, feature, now)));
+      await env.DB.prepare('INSERT INTO usage_events (id, project_id, metric, quantity, estimated_cost_cents, occurred_at) VALUES (?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), id, 'project_created', 1, 0, now).run();
+      await recordEvent(env, id, 'project_created', canBuild ? 'Ready to queue' : 'Waiting for GitHub and Cloudflare connections');
+      if (canBuild) {
+        await env.BUILD_JOBS.send({ projectId: id, prompt: body.prompt });
+        await env.BUILDS.getByName(id).plan(id, body.prompt);
+      }
+      return json({ project: await projectForOwner(env, id, sessionId) }, { status: 201 });
+    }
+
+    const featureMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/features\/([a-z0-9_-]{1,64})$/);
+    if (featureMatch && request.method === 'PATCH') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, featureMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+      const body = await request.json<{ enabled?: boolean }>();
+      if (typeof body.enabled !== 'boolean') return json({ error: 'enabled must be a boolean' }, { status: 400 });
+      const now = new Date().toISOString();
+      await env.DB.prepare('INSERT INTO project_features (project_id, feature, enabled, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(project_id, feature) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at').bind(project.id, featureMatch[2], Number(body.enabled), now).run();
+      await recordEvent(env, project.id, 'feature_updated', `${featureMatch[2]} ${body.enabled ? 'enabled' : 'disabled'}`);
+      return json({ feature: featureMatch[2], enabled: body.enabled });
+    }
+
+    const buildMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/build$/);
+    if (buildMatch && request.method === 'POST') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, buildMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+      const providers = await connectionProviders(env, sessionId);
+      if (!providers.has('github') || !providers.has('cloudflare')) return json({ status: 'needs_connections' }, { status: 409 });
+      const now = new Date().toISOString();
+      await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('planning', now, project.id).run();
+      await env.BUILD_JOBS.send({ projectId: project.id, prompt: project.prompt });
+      await env.BUILDS.getByName(project.id).plan(project.id, project.prompt);
+      await recordEvent(env, project.id, 'build_queued', 'Build queued after both provider connections were confirmed');
+      return json({ status: 'planning' }, { status: 202 });
     }
 
     return json({ error: 'Not found' }, { status: 404 });
@@ -234,7 +306,9 @@ export default {
 
   async queue(batch: MessageBatch<{ projectId: string; prompt: string }>, env: Env): Promise<void> {
     for (const message of batch.messages) {
-      await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('queued', new Date().toISOString(), message.body.projectId).run();
+      const now = new Date().toISOString();
+      await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('queued', now, message.body.projectId).run();
+      await recordEvent(env, message.body.projectId, 'build_queued', 'Queue consumer accepted the build job');
     }
   },
 };
