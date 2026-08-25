@@ -148,6 +148,11 @@ function successPage(provider: Provider): Response {
   });
 }
 
+function dashboardPage(): Response {
+  const body = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vela Control Plane</title><style>body{margin:0;background:#090b13;color:#edf0ff;font:16px system-ui,sans-serif}main{max-width:900px;margin:auto;padding:64px 24px}.eyebrow{color:#83a6ff;letter-spacing:.14em;text-transform:uppercase;font-size:12px}h1{font-size:clamp(42px,8vw,86px);line-height:.9;margin:16px 0 26px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}.card{border:1px solid #293252;border-radius:20px;padding:24px;background:linear-gradient(135deg,#12182b,#0c0e18)}button{background:#b8c7ff;border:0;border-radius:999px;padding:12px 18px;font-weight:700;cursor:pointer}button.alt{background:#1e2742;color:#edf0ff}textarea,input{box-sizing:border-box;width:100%;background:#090b13;border:1px solid #394567;color:#fff;border-radius:12px;padding:12px;margin:8px 0}small{color:#aeb9d9}.status{min-height:20px;color:#9ee7c6}</style></head><body><main><p class="eyebrow">Cloudflare control plane</p><h1>Build. Ship.<br>Control.</h1><p>This Worker is live. Connect the two accounts below, then create an isolated project from a prompt.</p><section class="grid"><article class="card"><h2>GitHub</h2><p id="github">Checking connection…</p><button onclick="location.href='/auth/github/start'">Connect GitHub</button></article><article class="card"><h2>Cloudflare</h2><p id="cloudflare">Checking connection…</p><button class="alt" onclick="location.href='/auth/cloudflare/start'">Connect Cloudflare</button></article></section><section class="card" style="margin-top:16px"><h2>New project</h2><input id="name" placeholder="Project name"><textarea id="prompt" rows="5" placeholder="Describe what you want to build…"></textarea><button onclick="createProject()">Create project</button><p class="status" id="status"></p><small>Project creation is intentionally locked until both accounts are connected.</small></section></main><script>async function refresh(){let r=await fetch('/connections');if(!r.ok){document.querySelectorAll('#github,#cloudflare').forEach(x=>x.textContent='Not connected');return}let d=await r.json(),p=new Set(d.connections.map(x=>x.provider));document.querySelector('#github').textContent=p.has('github')?'Connected':'Not connected';document.querySelector('#cloudflare').textContent=p.has('cloudflare')?'Connected':'Not connected'}async function createProject(){let s=document.querySelector('#status'),r=await fetch('/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:document.querySelector('#name').value,prompt:document.querySelector('#prompt').value})}),d=await r.json();s.textContent=r.ok?'Project planned: '+d.id:d.error}refresh()</script></body></html>`;
+  return new Response(body, { headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })) });
+}
+
 async function connectionProviders(env: Env, ownerId: string): Promise<Set<string>> {
   const result = await env.DB.prepare('SELECT provider FROM connections WHERE owner_id = ? AND status = ?').bind(ownerId, 'connected').all<{ provider: string }>();
   return new Set(result.results.map((connection) => connection.provider));
@@ -157,6 +162,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true, service: 'vela-control-plane' });
+    if (url.pathname === '/' && request.method === 'GET') return dashboardPage();
 
     const startProvider = providerFromPath(url.pathname, 'start');
     if (startProvider && request.method === 'GET') {
