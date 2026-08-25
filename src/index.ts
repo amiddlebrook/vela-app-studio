@@ -202,6 +202,9 @@ async function exchangeToken(provider: Provider, code: string, verifier: string,
     if (!env.GITHUB_CLIENT_SECRET) throw new Error('github OAuth is not configured');
     form.set('client_secret', env.GITHUB_CLIENT_SECRET);
   }
+  if (provider === 'cloudflare') {
+    form.set('grant_type', 'authorization_code');
+  }
   const endpoint = provider === 'google'
     ? 'https://oauth2.googleapis.com/token'
     : provider === 'github'
