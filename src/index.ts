@@ -376,7 +376,9 @@ export default {
       try {
         const verifier = JSON.parse(await decrypt(stored.code_verifier_ciphertext, env.TOKEN_ENCRYPTION_KEY)) as string;
         const token = await exchangeToken(callbackProvider, code, verifier, stored.redirect_uri, env);
-        const identity = await providerIdentity(callbackProvider, token.access_token!);
+        const identity = callbackProvider === 'cloudflare'
+          ? { id: env.CLOUDFLARE_ACCOUNT_ID }
+          : await providerIdentity(callbackProvider, token.access_token!);
         const login = callbackProvider === 'google' ? await completeGoogleLogin(env, stored.session_id, identity) : null;
         const ownerId = login?.ownerId ?? stored.session_id;
         const now = new Date().toISOString();
