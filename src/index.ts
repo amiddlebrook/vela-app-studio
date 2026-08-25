@@ -1,6 +1,7 @@
 export interface Env {
   DB: D1Database;
   BUILDS: DurableObjectNamespace;
+  BUILD_JOBS: Queue<{ projectId: string; prompt: string }>;
 }
 
 export class BuildCoordinator {
@@ -25,6 +26,7 @@ export default {
       const id = crypto.randomUUID();
       const now = new Date().toISOString();
       await env.DB.prepare('INSERT INTO projects (id, owner_id, name, prompt, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, body.ownerId, body.name, body.prompt, 'planning', now, now).run();
+      await env.BUILD_JOBS.send({ projectId: id, prompt: body.prompt });
       const build = env.BUILDS.getByName(id);
       const result = await build.fetch('https://build.internal/', { method: 'POST', body: JSON.stringify({ id, prompt: body.prompt }) });
       return new Response(result.body, { status: 201, headers: { 'content-type': 'application/json' } });

@@ -10,6 +10,7 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BuildCoordinator"] }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "queues": { "producers": [{ "binding": "BUILD_JOBS", "queue": "vela-build-jobs" }] },
   "d1_databases": [
     {
       "binding": "DB",
