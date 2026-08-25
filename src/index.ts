@@ -374,7 +374,8 @@ export default {
       await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash = ?').bind(stateHash).run();
       if (!stored || stored.provider !== callbackProvider || Date.parse(stored.expires_at) <= Date.now()) return json({ error: 'This connection request has expired. Start again.' }, { status: 400 });
       try {
-        const token = await exchangeToken(callbackProvider, code, await decrypt(stored.code_verifier_ciphertext, env.TOKEN_ENCRYPTION_KEY), stored.redirect_uri, env);
+        const verifier = JSON.parse(await decrypt(stored.code_verifier_ciphertext, env.TOKEN_ENCRYPTION_KEY)) as string;
+        const token = await exchangeToken(callbackProvider, code, verifier, stored.redirect_uri, env);
         const identity = await providerIdentity(callbackProvider, token.access_token!);
         const login = callbackProvider === 'google' ? await completeGoogleLogin(env, stored.session_id, identity) : null;
         const ownerId = login?.ownerId ?? stored.session_id;
@@ -384,7 +385,8 @@ export default {
           .bind(crypto.randomUUID(), ownerId, callbackProvider, identity.id, await encrypt(token.access_token, env.TOKEN_ENCRYPTION_KEY), token.refresh_token ? await encrypt(token.refresh_token, env.TOKEN_ENCRYPTION_KEY) : null, expiresAt, now, now).run();
         return successPage(callbackProvider, login?.cookie);
       } catch (error) {
-        console.error(JSON.stringify({ event: 'oauth_callback_failed', provider: callbackProvider, message: error instanceof Error ? error.message : 'unknown' }));
+        const reason = messageFromError(error);
+        console.error(JSON.stringify({ event: 'oauth_callback_failed', provider: callbackProvider, message: reason }));
         return json({ error: 'Connection could not be completed. Start again.' }, { status: 502 });
       }
     }
