@@ -431,16 +431,18 @@ function builderDashboard(): Response {
 <section class="grid"><article class="card"><h2>Describe the app</h2><input id="name" maxlength="80" placeholder="App name"><textarea id="prompt" class="prompt" maxlength="4000" placeholder="What should this app do, for whom, and what should it feel like?"></textarea><button id="create" onclick="createProject()">Create this app</button><p id="status" class="hint"></p><p class="hint">Once both connections are live, this queues a real build automatically.</p></article><article class="card"><h2>Launch access</h2><div class="connections"><div class="connection"><div><strong>GitHub</strong><div id="github" class="state">Checking…</div></div><button class="secondary" onclick="location.href='/auth/github/start'">Connect</button></div><div class="connection"><div><strong>Cloudflare</strong><div id="cloudflare" class="state">Checking…</div></div><button class="secondary" onclick="location.href='/auth/cloudflare/start'">Connect</button></div></div><p class="hint">GitHub holds each app’s isolated source repository. Cloudflare runs each app independently.</p></article><section class="card wide"><h2>Your build board</h2><div class="build-list" id="projects"><div class="empty">Loading build records…</div></div></section></section></main>
 <script>
 const $=s=>document.querySelector(s);let projects=[];let refreshTimer;
-const stages=['planning','building','creating_repository','deploying','live'];
-const labels={needs_connections:'Waiting for connections',planning:'Queued for planning',building:'Preparing app files',creating_repository:'Creating GitHub repository',deploying:'Deploying to Cloudflare',live:'Live',failed:'Build failed'};
+const stages=['planning','scaffolding','creating_repository','pushing_files','deploying_worker','enabling_subdomain','live'];
+const labels={needs_connections:'Waiting for connections',planning:'Planning app structure',scaffolding:'AI generating code',creating_repository:'Creating GitHub repository',pushing_files:'Pushing source files',deploying_worker:'Deploying to Cloudflare',enabling_subdomain:'Enabling workers.dev',live:'Live',failed:'Build failed',building:'Building'};
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.reason||d.error||'Request failed');return d}
-function statusClass(status){return status==='live'?'live':status==='failed'?'failed':status==='needs_connections'?'':'active'}
-function render(){const active=projects.filter(p=>!['live','failed','needs_connections'].includes(p.status));$('#activeCount').textContent=active.length?active.length+' build'+(active.length===1?'':'s')+' active':'No active builds';$('#signalText').textContent=active.length?'Auto-refreshing every 2 seconds':'Build events stay attached to each project';const root=$('#projects');if(!projects.length){root.innerHTML='<div class="empty">No builds yet. Describe an app above and its creation timeline will appear here.</div>';return}root.innerHTML=projects.map(p=>{const step=stages.indexOf(p.status);const dots=stages.map((stage,i)=>'<i class="step '+(i<step?'done':i===step&&step>=0&&p.status!=='live'?'now pulse':i===step&&p.status==='live'?'done':'')+'"></i>').join('');const event=p.latest_event;const repo=p.github_repository?'<a target="_blank" rel="noreferrer" href="https://github.com/'+esc(p.github_repository)+'">Open repository ↗</a>':'';const retry=p.status==='failed'?'<button class="secondary" onclick="retryBuild(&quot;'+p.id+'&quot;)">Retry build</button>':'';return '<article class="project"><div class="project-top"><div><h3>'+esc(p.name)+'</h3><div class="meta">'+esc(labels[p.status]||p.status)+' · updated '+new Date(p.updated_at).toLocaleTimeString()+'</div></div><span class="badge '+statusClass(p.status)+'">'+esc(labels[p.status]||p.status)+'</span></div><div class="steps" title="Planning → files → GitHub → Cloudflare → live">'+dots+'</div><div class="activity">'+(event?esc(event.detail)+'<time>'+new Date(event.created_at).toLocaleTimeString()+'</time>':'Project created — waiting for its first build event.')+'</div><div class="project-links">'+repo+(p.worker_name?'<a target="_blank" rel="noreferrer" href="https://'+esc(p.worker_name)+'.workers.dev">Open app ↗</a>':'')+retry+'</div></article>'}).join('')}
+function statusClass(s){return s==='live'?'live':s==='failed'?'failed':s==='needs_connections'?'':'active'}
+function render(){const active=projects.filter(p=>!['live','failed','needs_connections'].includes(p.status));$('#activeCount').textContent=active.length?active.length+' build'+(active.length===1?'':'s')+' active':'No active builds';$('#signalText').textContent=active.length?'Auto-refreshing every 2 seconds':'Build events stay attached to each project';const root=$('#projects');if(!projects.length){root.innerHTML='<div class="empty">No builds yet. Describe an app above and its creation timeline will appear here.</div>';return}root.innerHTML=projects.map(p=>{const step=stages.indexOf(p.status);const dots=stages.map((stage,i)=>'<i class="step '+(i<step?'done':i===step&&step>=0&&p.status!=='live'?'now pulse':i===step&&p.status==='live'?'done':'')+'"></i>').join('');const event=p.latest_event;const repo=p.github_repository?'<a target="_blank" rel="noreferrer" href="https://github.com/'+esc(p.github_repository)+'">Open repo ↗</a>':'';const appLink=p.worker_name&&p.status==='live'?'<a target="_blank" rel="noreferrer" href="https://'+esc(p.worker_name)+'.workers.dev">Open app ↗</a>':'';const retry=p.status==='failed'?'<button class="secondary" onclick="retryBuild(&quot;'+p.id+'&quot;)">Retry build</button>':'';const modify=p.status==='live'||p.status==='failed'?'<button class="secondary" onclick="modifyApp(&quot;'+p.id+'&quot;)">Modify</button>':'';const resume=p.status==='failed'?'<button class="secondary" onclick="resumeBuild(&quot;'+p.id+'&quot;)">Resume from last good stage</button>':'';return '<article class="project"><div class="project-top"><div><h3>'+esc(p.name)+'</h3><div class="meta">'+esc(labels[p.status]||p.status)+' · updated '+new Date(p.updated_at).toLocaleTimeString()+'</div></div><span class="badge '+statusClass(p.status)+'">'+esc(labels[p.status]||p.status)+'</span></div><div class="steps" title="Plan → AI → Repo → Files → Deploy → Subdomain → Live">'+dots+'</div><div class="activity">'+(event?esc(event.detail)+'<time>'+new Date(event.created_at).toLocaleTimeString()+'</time>':'Project created — waiting for its first build event.')+'</div><div class="project-links">'+repo+appLink+retry+resume+modify+'</div></article>'}).join('')}
 async function refresh(){try{const [c,p]=await Promise.all([api('/connections'),api('/projects')]);const connections=new Map(c.connections.map(x=>[x.provider,x]));for(const provider of ['github','cloudflare']){const node=$('#'+provider),connection=connections.get(provider),expired=connection?.token_expires_at&&Date.parse(connection.token_expires_at)<=Date.now()+60000,yes=!!connection&&!expired;node.textContent=yes?'Connected and ready':expired?'Reconnect required (token expired)':'Not connected';node.className='state '+(yes?'ok':'wait')}projects=p.projects;render()}catch(e){$('#status').textContent=e.message}finally{clearTimeout(refreshTimer);refreshTimer=setTimeout(refresh,projects.some(p=>!['live','failed','needs_connections'].includes(p.status))?2000:12000)}}
 async function createProject(){const status=$('#status'),button=$('#create');status.textContent='Creating project record…';button.disabled=true;try{const d=await api('/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#name').value,prompt:$('#prompt').value})});status.textContent='Created '+d.project.name+'. Watch its build board below.';$('#name').value='';$('#prompt').value='';await refresh()}catch(e){status.textContent=e.message}finally{button.disabled=false}}
 async function retryBuild(id){$('#status').textContent='Re-queuing build…';try{await api('/projects/'+id+'/build',{method:'POST'});$('#status').textContent='Build re-queued. Watching its progress below.';await refresh()}catch(e){$('#status').textContent=e.message}}
-(async()=>{try{await api('/session',{method:'POST'})}catch(e){$('#status').textContent=e.message}refresh()})();
+async function resumeBuild(id){$('#status').textContent='Resuming from last good stage…';try{await api('/projects/'+id+'/build',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({resumeFrom:'scaffolding'})});$('#status').textContent='Build resumed. Watching its progress below.';await refresh()}catch(e){$('#status').textContent=e.message}}
+async function modifyApp(id){const newPrompt=prompt('Enter updated prompt for this app:');if(!newPrompt||!newPrompt.trim())return;$('#status').textContent='Updating and rebuilding…';try{await api('/projects/'+id+'/build',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({prompt:newPrompt})});$('#status').textContent='App updated and rebuilding. Watching its progress below.';$('#name').value='';$('#prompt').value='';await refresh()}catch(e){$('#status').textContent=e.message}}
+(async()=>{try{await api('/session',{method:'POST'})}catch(e){$('#status').textContent=e.message}refresh})();
 </script></body></html>`;
   return new Response(body, { headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })) });
 }
@@ -468,11 +470,13 @@ async function projectForOwner(env: Env, id: string, ownerId: string) {
   return env.DB.prepare('SELECT id, name, prompt, status, created_at, updated_at FROM projects WHERE id = ? AND owner_id = ?').bind(id, ownerId).first<{ id: string; name: string; prompt: string; status: string; created_at: string; updated_at: string }>();
 }
 
-async function recordEvent(env: Env, projectId: string, kind: string, detail: string): Promise<void> {
-  await env.DB.prepare('INSERT INTO build_events (id, project_id, kind, detail, created_at) VALUES (?, ?, ?, ?, ?)').bind(crypto.randomUUID(), projectId, kind, detail, new Date().toISOString()).run();
+async function recordEvent(env: Env, projectId: string, kind: string, detail: string, stage?: string): Promise<void> {
+  await env.DB.prepare('INSERT INTO build_events (id, project_id, kind, detail, stage, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), projectId, kind, detail, stage, new Date().toISOString()).run();
 }
 
-async function buildStandaloneApp(env: Env, projectId: string): Promise<void> {
+const BUILD_STAGES = ['planning', 'scaffolding', 'creating_repository', 'pushing_files', 'deploying_worker', 'enabling_subdomain', 'live'] as const;
+
+async function buildStandaloneApp(env: Env, projectId: string, resumeFrom?: string): Promise<void> {
   const project = await env.DB.prepare('SELECT id, owner_id, name, prompt, github_repository, worker_name FROM projects WHERE id = ?').bind(projectId).first<ProjectRecord>();
   if (!project) throw new Error('Project no longer exists');
   if (!env.CLOUDFLARE_ACCOUNT_ID) throw new Error('Cloudflare account is not configured on the control plane');
@@ -485,63 +489,86 @@ async function buildStandaloneApp(env: Env, projectId: string): Promise<void> {
   const repositoryName = `${safeSlug(project.name, 'app')}-${suffix}`;
   const workerName = project.worker_name ?? `vela-${safeSlug(project.name, 'app')}-${suffix}`;
   const now = new Date().toISOString();
+  const stageOf = (name: string) => BUILD_STAGES.indexOf(name as typeof BUILD_STAGES[number]);
+  const shouldSkip = (name: string) => resumeFrom && stageOf(name) < stageOf(resumeFrom);
 
-  // --- Agentic LLM scaffolding (with fallback to standalone worker) ---
+  // --- Stage 1: Planning + AI Scaffolding ---
+  if (!shouldSkip('planning')) {
+    await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('planning', new Date().toISOString(), projectId).run();
+    await recordEvent(env, projectId, 'build_started', 'Planning app structure and generating full-stack code', 'planning');
+  }
+
   let source: string;
-  let scaffolding: {frontend: string; backend: string; database: string; config: string; instructions: string} = {
-    frontend: '',
-    backend: '',
-    database: '',
-    config: '',
-    instructions: '',
-  };
-  try {
-    scaffolding = await scaffoldAppWithLLM(project.prompt, env.OPENROUTER_MODEL);
-    // Use the LLM-generated backend as the worker script
-    // The backend should be a valid Cloudflare Workers fetch handler
-    source = scaffolding.backend;
-    // Persist the other sections as project metadata in D1
-    await env.DB.prepare('UPDATE projects SET scaffolding_json = ? WHERE id = ?').bind(JSON.stringify(scaffolding), project.id).run();
-  } catch (llmError) {
-    // Fall back to the simple standalone worker source
-    console.warn('Agentic LLM scaffolding failed, falling back to standalone worker source:', llmError.message);
-    scaffolding = {
-      frontend: '',
-      backend: standaloneWorkerSource(project.name, project.prompt),
-      database: '',
-      config: '',
-      instructions: '',
-    };
-    source = scaffolding.backend;
-    await env.DB.prepare('UPDATE projects SET scaffolding_json = ? WHERE id = ?').bind(JSON.stringify(scaffolding), project.id).run();
+  let scaffolding: {frontend: string; backend: string; database: string; config: string; instructions: string} = { frontend: '', backend: '', database: '', config: '', instructions: '' };
+  if (!shouldSkip('scaffolding')) {
+    await recordEvent(env, projectId, 'scaffolding_started', 'AI agent generating frontend, backend, database schema, and config', 'scaffolding');
+    try {
+      scaffolding = await scaffoldAppWithLLM(project.prompt, env.OPENROUTER_MODEL);
+      source = scaffolding.backend;
+      await env.DB.prepare('UPDATE projects SET scaffolding_json = ? WHERE id = ?').bind(JSON.stringify(scaffolding), project.id).run();
+      await recordEvent(env, projectId, 'scaffolding_complete', `Generated ${scaffolding.backend.length} chars backend, ${scaffolding.frontend.length} chars frontend, ${scaffolding.database.length} chars schema`, 'scaffolding');
+    } catch (llmError) {
+      console.warn('Agentic LLM scaffolding failed, falling back to standalone worker source:', llmError.message);
+      scaffolding = { frontend: '', backend: standaloneWorkerSource(project.name, project.prompt), database: '', config: '', instructions: '' };
+      source = scaffolding.backend;
+      await env.DB.prepare('UPDATE projects SET scaffolding_json = ? WHERE id = ?').bind(JSON.stringify(scaffolding), project.id).run();
+      await recordEvent(env, projectId, 'scaffolding_fallback', `LLM failed (${llmError.message.slice(0, 200)}), using standalone worker`, 'scaffolding');
+    }
+  } else {
+    const existing = await env.DB.prepare('SELECT scaffolding_json FROM projects WHERE id = ?').bind(projectId).first<{ scaffolding_json: string | null }>();
+    scaffolding = existing?.scaffolding_json ? JSON.parse(existing.scaffolding_json) : scaffolding;
+    source = scaffolding.backend || standaloneWorkerSource(project.name, project.prompt);
   }
 
   if (!project.github_repository) {
-    await env.DB.prepare('UPDATE projects SET status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind('creating_repository', workerName, now, project.id).run();
-    await recordEvent(env, project.id, 'repository_started', `Creating private GitHub repository ${repositoryName}`);
-    const repository = await githubRequest<{ full_name: string }>(github.accessToken, '/user/repos', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: repositoryName, description: project.prompt.slice(0, 160), private: true, has_issues: true, has_projects: true }),
-    });
-    const wrangler = JSON.stringify({ name: workerName, main: 'src/worker.mjs', compatibility_date: '2026-08-25' }, null, 2) + '\n';
-    await putGithubFile(github.accessToken, repository.full_name, 'README.md', `# ${project.name}\n\n${project.prompt}\n\nThis is a standalone Cloudflare Worker created by Vela.\n`, 'Add project README');
-    await putGithubFile(github.accessToken, repository.full_name, 'src/worker.mjs', source, 'Add standalone Worker');
-    await putGithubFile(github.accessToken, repository.full_name, 'wrangler.json', wrangler, 'Add Worker configuration');
-    await env.DB.prepare('UPDATE projects SET github_repository = ?, status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind(repository.full_name, 'deploying', workerName, new Date().toISOString(), project.id).run();
-    await recordEvent(env, project.id, 'repository_created', `Private repository ${repository.full_name} created`);
+    if (!shouldSkip('creating_repository')) {
+      await env.DB.prepare('UPDATE projects SET status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind('creating_repository', workerName, new Date().toISOString(), project.id).run();
+      await recordEvent(env, projectId, 'repository_started', `Creating private GitHub repository ${repositoryName}`, 'creating_repository');
+      const repository = await githubRequest<{ full_name: string }>(github.accessToken, '/user/repos', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: repositoryName, description: project.prompt.slice(0, 160), private: true, has_issues: true, has_projects: true }),
+      });
+      const wrangler = JSON.stringify({ name: workerName, main: 'src/worker.mjs', compatibility_date: '2026-08-25' }, null, 2) + '\n';
+      await recordEvent(env, projectId, 'repository_created', `Private repository ${repository.full_name} created`, 'creating_repository');
+
+      if (!shouldSkip('pushing_files')) {
+        await recordEvent(env, projectId, 'pushing_files', `Pushing ${scaffolding.frontend ? 'LLM-generated' : 'standalone'} source files to ${repository.full_name}`, 'pushing_files');
+        await putGithubFile(github.accessToken, repository.full_name, 'README.md', `# ${project.name}\n\n${project.prompt}\n\n${scaffolding.instructions || 'Created by Vela Control Plane.'}\n`, 'Add project README');
+        await putGithubFile(github.accessToken, repository.full_name, 'src/worker.mjs', source, 'Add Worker source');
+        await putGithubFile(github.accessToken, repository.full_name, 'wrangler.json', wrangler, 'Add Worker configuration');
+        if (scaffolding.frontend) await putGithubFile(github.accessToken, repository.full_name, 'src/frontend.jsx', scaffolding.frontend, 'Add frontend component');
+        if (scaffolding.database) await putGithubFile(github.accessToken, repository.full_name, 'schema.sql', scaffolding.database, 'Add database schema');
+        await env.DB.prepare('UPDATE projects SET github_repository = ?, status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind(repository.full_name, 'deploying_worker', workerName, new Date().toISOString(), project.id).run();
+        await recordEvent(env, projectId, 'files_pushed', `All source files pushed to ${repository.full_name}`, 'pushing_files');
+      }
+    } else {
+      await env.DB.prepare('UPDATE projects SET status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind('deploying_worker', workerName, new Date().toISOString(), project.id).run();
+    }
   } else {
-    await env.DB.prepare('UPDATE projects SET status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind('deploying', workerName, now, project.id).run();
-    await recordEvent(env, project.id, 'repository_reused', `Reusing existing repository ${project.github_repository} for this deployment retry`);
+    if (!shouldSkip('pushing_files')) {
+      await env.DB.prepare('UPDATE projects SET status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind('pushing_files', workerName, now, project.id).run();
+      await recordEvent(env, projectId, 'repository_reused', `Reusing existing repository ${project.github_repository}`, 'pushing_files');
+      await putGithubFile(github.accessToken, project.github_repository, 'src/worker.mjs', source, 'Update Worker source');
+      if (scaffolding.frontend) await putGithubFile(github.accessToken, project.github_repository, 'src/frontend.jsx', scaffolding.frontend, 'Update frontend component');
+      if (scaffolding.database) await putGithubFile(github.accessToken, project.github_repository, 'schema.sql', scaffolding.database, 'Update database schema');
+      await recordEvent(env, projectId, 'files_pushed', `Source files updated in ${project.github_repository}`, 'pushing_files');
+    }
   }
 
-  await deployStandaloneWorker(cloudflare.accessToken, env.CLOUDFLARE_ACCOUNT_ID, workerName, source);
+  if (!shouldSkip('deploying_worker')) {
+    await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('deploying_worker', new Date().toISOString(), project.id).run();
+    await recordEvent(env, projectId, 'deployment_started', `Deploying worker ${workerName} to Cloudflare`, 'deploying_worker');
+    await deployStandaloneWorker(cloudflare.accessToken, env.CLOUDFLARE_ACCOUNT_ID, workerName, source);
+    await recordEvent(env, projectId, 'deployment_complete', `Worker ${workerName} uploaded and subdomain enabled`, 'deploying_worker');
+  }
+
   await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('live', new Date().toISOString(), project.id).run();
-  await recordEvent(env, project.id, 'deployment_complete', `Worker deployed as ${workerName}`);
+  await recordEvent(env, projectId, 'live', `App is live at https://${workerName}.workers.dev`, 'live');
 }
 
 async function projectsWithFeatures(env: Env, ownerId: string) {
-  const projects = await env.DB.prepare('SELECT id, name, prompt, github_repository, worker_name, status, created_at, updated_at FROM projects WHERE owner_id = ? ORDER BY updated_at DESC').bind(ownerId).all<Record<string, string | null>>();
+  const projects = await env.DB.prepare('SELECT id, name, prompt, github_repository, worker_name, status, scaffolding_json, created_at, updated_at FROM projects WHERE owner_id = ? ORDER BY updated_at DESC').bind(ownerId).all<Record<string, string | null>>();
   const features = await env.DB.prepare('SELECT project_id, feature, enabled, updated_at FROM project_features WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?) ORDER BY feature').bind(ownerId).all<{ project_id: string; feature: string; enabled: number; updated_at: string }>();
   const events = await env.DB.prepare('SELECT project_id, kind, detail, created_at FROM build_events WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?) ORDER BY created_at DESC').bind(ownerId).all<{ project_id: string; kind: string; detail: string; created_at: string }>();
   return projects.results.map((project) => ({
@@ -658,6 +685,7 @@ export default {
       if (canBuild) {
         await env.BUILD_JOBS.send({ projectId: id, prompt: body.prompt });
         await env.BUILDS.getByName(id).plan(id, body.prompt);
+        await recordEvent(env, id, 'build_queued', 'Build queued — both GitHub and Cloudflare connected', 'planning');
       }
       return json({ project: await projectForOwner(env, id, sessionId) }, { status: 201 });
     }
@@ -691,28 +719,50 @@ export default {
       if (!project) return json({ error: 'Project not found' }, { status: 404 });
       const providers = await connectionProviders(env, sessionId);
       if (!providers.has('github') || !providers.has('cloudflare')) return json({ status: 'needs_connections' }, { status: 409 });
+      const body = await request.json<{ prompt?: string; resumeFrom?: string }>().catch(() => ({}));
       const now = new Date().toISOString();
+      const buildPrompt = body.prompt?.trim() || project.prompt;
+      if (body.prompt?.trim()) {
+        await env.DB.prepare('UPDATE projects SET prompt = ?, updated_at = ? WHERE id = ?').bind(body.prompt.trim().slice(0, 4000), now, project.id).run();
+      }
       await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('planning', now, project.id).run();
-      await env.BUILD_JOBS.send({ projectId: project.id, prompt: project.prompt });
-      await env.BUILDS.getByName(project.id).plan(project.id, project.prompt);
-      await recordEvent(env, project.id, 'build_queued', 'Build queued after both provider connections were confirmed');
+      await env.BUILD_JOBS.send({ projectId: project.id, prompt: buildPrompt, resumeFrom: body.resumeFrom });
+      await env.BUILDS.getByName(project.id).plan(project.id, buildPrompt);
+      await recordEvent(env, project.id, 'build_queued', body.resumeFrom ? `Build resumed from stage: ${body.resumeFrom}` : 'Build queued', 'planning');
       return json({ status: 'planning' }, { status: 202 });
+    }
+
+    const updateMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})$/);
+    if (updateMatch && request.method === 'PATCH') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, updateMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+      const body = await request.json<{ name?: string; prompt?: string }>().catch(() => ({}));
+      const updates: string[] = [];
+      const binds: unknown[] = [];
+      if (body.name?.trim()) { updates.push('name = ?'); binds.push(body.name.trim().slice(0, 80)); }
+      if (body.prompt?.trim()) { updates.push('prompt = ?'); binds.push(body.prompt.trim().slice(0, 4000)); }
+      if (updates.length === 0) return json({ error: 'No fields to update' }, { status: 400 });
+      updates.push('updated_at = ?');
+      binds.push(new Date().toISOString(), project.id);
+      await env.DB.prepare(`UPDATE projects SET ${updates.join(', ')} WHERE id = ?`).bind(...binds).run();
+      return json({ updated: true });
     }
 
     return json({ error: 'Not found' }, { status: 404 });
   },
 
-  async queue(batch: MessageBatch<{ projectId: string; prompt: string }>, env: Env): Promise<void> {
+  async queue(batch: MessageBatch<{ projectId: string; prompt: string; resumeFrom?: string }>, env: Env): Promise<void> {
     for (const message of batch.messages) {
       try {
         await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('building', new Date().toISOString(), message.body.projectId).run();
-        await recordEvent(env, message.body.projectId, 'build_started', 'Queue consumer started the standalone app build');
-        await buildStandaloneApp(env, message.body.projectId);
+        await recordEvent(env, message.body.projectId, 'build_queued', message.body.resumeFrom ? `Resuming build from stage: ${message.body.resumeFrom}` : 'Fresh build started', 'building');
+        await buildStandaloneApp(env, message.body.projectId, message.body.resumeFrom);
         message.ack();
       } catch (error) {
         const detail = messageFromError(error);
         await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('failed', new Date().toISOString(), message.body.projectId).run();
-        await recordEvent(env, message.body.projectId, 'build_failed', detail);
+        await recordEvent(env, message.body.projectId, 'build_failed', detail, 'failed');
         console.error(JSON.stringify({ event: 'build_failed', projectId: message.body.projectId, message: detail }));
         message.ack();
       }
