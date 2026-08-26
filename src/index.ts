@@ -361,7 +361,7 @@ export default {
       const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', state, code_challenge: await sha256(verifier), code_challenge_method: 'S256' });
       if (startProvider === 'google') params.set('scope', 'openid email profile');
       if (startProvider === 'github') params.set('scope', 'repo workflow read:user');
-      if (startProvider === 'cloudflare') params.set('scope', 'workers-platform.read workers-platform.write');
+      if (startProvider === 'cloudflare') params.set('scope', 'workers-scripts.read workers-scripts.edit');
       const endpoint = startProvider === 'google'
         ? 'https://accounts.google.com/o/oauth2/v2/auth'
         : startProvider === 'github'
