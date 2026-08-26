@@ -11,6 +11,7 @@ export interface Env {
   CLOUDFLARE_CLIENT_SECRET?: string;
   CLOUDFLARE_ACCOUNT_ID: string;
   GITHUB_CLIENT_ID?: string;
+  OPENROUTER_API_KEY?: string;
   GITHUB_CLIENT_SECRET?: string;
   SESSION_SECRET: string;
   TOKEN_ENCRYPTION_KEY: CryptoKey;
@@ -110,6 +111,98 @@ function safeSlug(value: string, fallback: string): string {
 
 function messageFromError(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 500) : 'Unknown build error';
+}
+
+// --- Multi-LLM Code Generation ---
+
+async function callOpenRouter(messages: Array<{role: string; content: string}>, model?: string): Promise<string> {
+  const apiKey = env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error('OpenRouter API key not configured');
+  const targetModel = model || 'anthropic/claude-3.5-sonnet';
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: targetModel,
+      messages,
+    }),
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`OpenRouter error ${response.status}: ${err.slice(0, 200)}`);
+  }
+  const data = await response.json();
+  return data.choices[0]?.message?.content ?? '';
+}
+
+type ScaffoldResult = {
+  frontend: string;
+  backend: string;
+  database: string;
+  config: string;
+  instructions: string;
+};
+
+async function scaffoldAppWithLLM(prompt: string, model?: string): Promise<ScaffoldResult> {
+  const systemPrompt = `You are Vela, an agentic full-stack app builder. Given a natural language prompt, generate a complete, production-ready full-stack application.
+
+Generate code in these formats:
+- FRONTEND: React/Next.js page component with Tailwind CSS. Include all necessary imports, state management, and a responsive UI.
+- BACKEND: Cloudflare Workers API route handlers (app.mjs format). Include request validation, error handling, and D1 database interactions where applicable.
+- DATABASE: D1 SQL schema (CREATE TABLE statements) with migrations. Design tables based on the app's needs.
+- CONFIG: wrangler.jsonc configuration with D1 bindings, Queue, and DO namespace. Set compatibility_date to "2026-08-25".
+- INSTRUCTIONS: A concise guide for the user on how to use the app, what features are included, and any deployment notes.
+
+CRITICAL: Output ONLY the code blocks and configuration. Do not include explanatory text, markdown formatting outside of code blocks, or conversational messages. Each section must be clearly labeled with a header line like "FRONTEND:", "BACKEND:", "DATABASE:", "CONFIG:", "INSTRUCTIONS:". The generated code must be immediately usable - no placeholders, no "TODO" comments, complete functional code.
+
+User prompt: ${prompt}
+`
+  const userPrompt = `Generate a complete full-stack application. Be thorough and production-ready.`;
+
+  const messages = [
+    {role: 'system', content: systemPrompt},
+    {role: 'user', content: userPrompt},
+  ];
+
+  let content: string;
+  if (env.OPENROUTER_API_KEY) {
+    try {
+      content = await callOpenRouter(messages, model);
+    } catch (e) {
+      console.warn('OpenRouter failed:', e.message);
+      throw e;
+    }
+  } else {
+    throw new Error('No LLM provider configured. Set OPENROUTER_API_KEY environment variable.');
+  }
+
+  // Parse the labeled sections
+  const result: ScaffoldResult = {
+    frontend: '',
+    backend: '',
+    database: '',
+    config: '',
+    instructions: '',
+  };
+
+  const sections = content.split(/\n(?=^(FRONTEND|BACKEND|DATABASE|CONFIG|INSTRUCTIONS):)/m);
+  for (const section of sections) {
+    const match = section.match(/^(FRONTEND|BACKEND|DATABASE|CONFIG|INSTRUCTIONS):\s*(.*)$/m);
+    if (match) {
+      const key = match[1] as keyof ScaffoldResult;
+      result[key] = match[2].trim();
+    }
+  }
+
+  // Validate we have at least frontend + backend
+  if (!result.frontend || !result.backend) {
+    throw new Error('LLM response missing required sections (frontend/backend)');
+  }
+
+  return result;
 }
 
 async function connectedToken(env: Env, ownerId: string, provider: Exclude<Provider, 'google'>): Promise<ConnectionToken> {
@@ -392,7 +485,36 @@ async function buildStandaloneApp(env: Env, projectId: string): Promise<void> {
   const repositoryName = `${safeSlug(project.name, 'app')}-${suffix}`;
   const workerName = project.worker_name ?? `vela-${safeSlug(project.name, 'app')}-${suffix}`;
   const now = new Date().toISOString();
-  const source = standaloneWorkerSource(project.name, project.prompt);
+
+  // --- Agentic LLM scaffolding (with fallback to standalone worker) ---
+  let source: string;
+  let scaffolding: {frontend: string; backend: string; database: string; config: string; instructions: string} = {
+    frontend: '',
+    backend: '',
+    database: '',
+    config: '',
+    instructions: '',
+  };
+  try {
+    scaffolding = await scaffoldAppWithLLM(project.prompt, env.OPENROUTER_MODEL);
+    // Use the LLM-generated backend as the worker script
+    // The backend should be a valid Cloudflare Workers fetch handler
+    source = scaffolding.backend;
+    // Persist the other sections as project metadata in D1
+    await env.DB.prepare('UPDATE projects SET scaffolding_json = ? WHERE id = ?').bind(JSON.stringify(scaffolding), project.id).run();
+  } catch (llmError) {
+    // Fall back to the simple standalone worker source
+    console.warn('Agentic LLM scaffolding failed, falling back to standalone worker source:', llmError.message);
+    scaffolding = {
+      frontend: '',
+      backend: standaloneWorkerSource(project.name, project.prompt),
+      database: '',
+      config: '',
+      instructions: '',
+    };
+    source = scaffolding.backend;
+    await env.DB.prepare('UPDATE projects SET scaffolding_json = ? WHERE id = ?').bind(JSON.stringify(scaffolding), project.id).run();
+  }
 
   if (!project.github_repository) {
     await env.DB.prepare('UPDATE projects SET status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind('creating_repository', workerName, now, project.id).run();
