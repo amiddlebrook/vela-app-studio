@@ -41,6 +41,12 @@ function base64Url(bytes: Uint8Array): string {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
+function base64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 function base64UrlBytes(value: string): Uint8Array {
   const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - (value.length % 4)) % 4);
   return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
@@ -149,7 +155,7 @@ async function putGithubFile(token: string, repository: string, path: string, co
   await githubRequest(token, `/repos/${repository}/contents/${path}`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ message, content: base64Url(encoder.encode(content)) }),
+    body: JSON.stringify({ message, content: base64(encoder.encode(content)) }),
   });
 }
 
