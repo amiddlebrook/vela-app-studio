@@ -152,32 +152,56 @@ type PlanResult = {
   features: string[];
   techStack: string[];
   estimatedSteps: string[];
+  security: {
+    rbac: boolean;
+    auditLog: boolean;
+    fieldLevelSecurity: boolean;
+    dataSegmentation: boolean;
+  };
 };
 
-async function planAppWithLLM(prompt: string, model?: string): Promise<PlanResult> {
-  const systemPrompt = `You are Vela, an expert app architect. Given a user's app idea, produce a clear, structured MVP plan.
+function buildPlanSystemPrompt(prompt: string): string {
+  return `You are Vela, a world-class enterprise full-stack architect. Your mission: generate a complete, production-ready MVP plan from a single natural language prompt. ZERO clarifying questions - the user has already provided their idea, deliver the plan immediately.
 
 Output EXACTLY this JSON format and nothing else:
+
 {
   "name": "App Name",
-  "description": "1-2 sentence description of what the app does and who it's for",
+  "description": "1-2 sentence description of what the app does and who it's for,
   "features": ["feature 1", "feature 2", "feature 3", ...],
-  "techStack": ["Cloudflare Workers", "D1 Database", "React", ...],
-  "estimatedSteps": ["Step 1 description", "Step 2 description", ...]
+  "techStack": ["Cloudflare Workers", "D1 Database", ...],
+  "estimatedSteps": ["Step 1 description", "Step 2 description", ...],
+  "security": {
+    "rbac": true,
+    "auditLog": true,
+    "fieldLevelSecurity": true,
+    "dataSegmentation": true
+  }
 }
 
-Rules:
-- Features: 4-8 concrete, buildable features for an MVP
-- TechStack: Always include Cloudflare Workers + D1; add others as appropriate
+CRITICAL INSTRUCTIONS:
+- Output ONLY the JSON object above - no markdown, no explanation, no conversational text
+- Features: 4-8 concrete, buildable MVP features for Cloudflare Workers + D1
+- TechStack: ALWAYS include "Cloudflare Workers" and "D1 Database". Add others as appropriate (React, Stripe, etc.)
 - EstimatedSteps: 3-6 clear build steps the system will follow
-- Keep it practical and focused on what can actually be built
-- Output ONLY the JSON object, no markdown, no explanation
+- Security: ALWAYS set all four security flags to true (rbac, auditLog, fieldLevelSecurity, dataSegmentation) - enterprise plans MUST have these enabled
+- Do NOT ask clarifying questions, do NOT request more input, do NOT output anything besides the JSON
+- The user's prompt is: ${prompt}
 
-User idea: ${prompt}`;
+Rules:
+- Features must be specific, buildable Cloudflare Workers + D1 features
+- At least 2 features must involve D1 database interactions
+- At least 1 feature must involve API route handlers
+- Security flags must ALL be true - this is non-negotiable for enterprise plans
+- Output ONLY the JSON object enclosed in curly braces - nothing before or after`;
+}
+
+async function planAppWithLLM(prompt: string, model?: string): Promise<PlanResult> {
+  const systemPrompt = buildPlanSystemPrompt(prompt);
 
   const messages = [
     { role: 'system', content: systemPrompt },
-    { role: 'user', content: `Plan this app: ${prompt}` },
+    { role: 'user', content: 'Plan this app: ' + prompt },
   ];
 
   let content: string;
@@ -188,9 +212,22 @@ User idea: ${prompt}`;
   }
 
   // Extract JSON from response (handle markdown code blocks)
-  const jsonMatch = content.match(/\{[\s\S]*\}/);
+  const jsonMatch = content.match(/^\s*\{[\s\S]*\}\s*$/m);
   if (!jsonMatch) throw new Error('LLM did not return valid JSON plan');
-  return JSON.parse(jsonMatch[0]) as PlanResult;
+
+  const parsed = JSON.parse(jsonMatch[0]) as PlanResult;
+
+  // Enforce enterprise security requirements
+  if (parsed.security == null || parsed.security.rbac === undefined) parsed.security.rbac = true;
+  if (parsed.security == null || parsed.security.auditLog === undefined) parsed.security.auditLog = true;
+  if (parsed.security == null || parsed.security.fieldLevelSecurity === undefined) parsed.security.fieldLevelSecurity = true;
+  if (parsed.security == null || parsed.security.dataSegmentation === undefined) parsed.security.dataSegmentation = true;
+
+  // Ensure Cloudflare + D1 are in tech stack
+  if (!parsed.techStack?.includes('Cloudflare Workers')) parsed.techStack.push('Cloudflare Workers');
+  if (!parsed.techStack?.includes('D1 Database')) parsed.techStack.push('D1 Database');
+
+  return parsed;
 }
 
 async function scaffoldAppWithLLM(prompt: string, model?: string): Promise<ScaffoldResult> {
