@@ -20,7 +20,7 @@ type Provider = 'google' | 'github' | 'cloudflare';
 type OAuthState = { provider: Provider; session_id: string; code_verifier_ciphertext: string; redirect_uri: string; expires_at: string };
 type ProviderToken = { access_token?: string; refresh_token?: string; expires_in?: number; error?: string; error_description?: string };
 type ProviderIdentity = { id: string; email?: string; name?: string };
-type ProjectRecord = { id: string; owner_id: string; name: string; prompt: string };
+type ProjectRecord = { id: string; owner_id: string; name: string; prompt: string; github_repository: string | null; worker_name: string | null };
 type ConnectionToken = { accessToken: string; externalAccountId: string | null };
 
 const encoder = new TextEncoder();
@@ -113,10 +113,13 @@ function messageFromError(error: unknown): string {
 }
 
 async function connectedToken(env: Env, ownerId: string, provider: Exclude<Provider, 'google'>): Promise<ConnectionToken> {
-  const connection = await env.DB.prepare('SELECT access_token_ciphertext, external_account_id FROM connections WHERE owner_id = ? AND provider = ? AND status = ?')
+  const connection = await env.DB.prepare('SELECT access_token_ciphertext, external_account_id, token_expires_at FROM connections WHERE owner_id = ? AND provider = ? AND status = ?')
     .bind(ownerId, provider, 'connected')
-    .first<{ access_token_ciphertext: string | null; external_account_id: string | null }>();
+    .first<{ access_token_ciphertext: string | null; external_account_id: string | null; token_expires_at: string | null }>();
   if (!connection?.access_token_ciphertext) throw new Error(`${provider} connection is missing or expired`);
+  if (connection.token_expires_at && Date.parse(connection.token_expires_at) <= Date.now() + 60_000) {
+    throw new Error(`${provider} connection has expired. Reconnect ${provider} to continue.`);
+  }
   return {
     accessToken: JSON.parse(await decrypt(connection.access_token_ciphertext, env.TOKEN_ENCRYPTION_KEY)) as string,
     externalAccountId: connection.external_account_id,
@@ -180,7 +183,10 @@ async function deployStandaloneWorker(token: string, accountId: string, workerNa
     headers: { authorization: `Bearer ${token}` },
     body: form,
   });
-  if (!response.ok) throw new Error(`Cloudflare Worker deployment failed (${response.status})`);
+  if (!response.ok) {
+    const detail = (await response.text()).replace(/\s+/g, ' ').slice(0, 350);
+    throw new Error(`Cloudflare Worker deployment failed (${response.status}): ${detail || 'No additional detail returned'}`);
+  }
 }
 
 function securityHeaders(headers = new Headers()): Headers {
@@ -300,7 +306,7 @@ const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.reason||d.error||'Request failed');return d}
 function statusClass(status){return status==='live'?'live':status==='failed'?'failed':status==='needs_connections'?'':'active'}
 function render(){const active=projects.filter(p=>!['live','failed','needs_connections'].includes(p.status));$('#activeCount').textContent=active.length?active.length+' build'+(active.length===1?'':'s')+' active':'No active builds';$('#signalText').textContent=active.length?'Auto-refreshing every 2 seconds':'Build events stay attached to each project';const root=$('#projects');if(!projects.length){root.innerHTML='<div class="empty">No builds yet. Describe an app above and its creation timeline will appear here.</div>';return}root.innerHTML=projects.map(p=>{const step=stages.indexOf(p.status);const dots=stages.map((stage,i)=>'<i class="step '+(i<step?'done':i===step&&step>=0&&p.status!=='live'?'now pulse':i===step&&p.status==='live'?'done':'')+'"></i>').join('');const event=p.latest_event;const repo=p.github_repository?'<a target="_blank" rel="noreferrer" href="https://github.com/'+esc(p.github_repository)+'">Open repository ↗</a>':'';const retry=p.status==='failed'?'<button class="secondary" onclick="retryBuild(\''+p.id+'\')">Retry build</button>':'';return '<article class="project"><div class="project-top"><div><h3>'+esc(p.name)+'</h3><div class="meta">'+esc(labels[p.status]||p.status)+' · updated '+new Date(p.updated_at).toLocaleTimeString()+'</div></div><span class="badge '+statusClass(p.status)+'">'+esc(labels[p.status]||p.status)+'</span></div><div class="steps" title="Planning → files → GitHub → Cloudflare → live">'+dots+'</div><div class="activity">'+(event?esc(event.detail)+'<time>'+new Date(event.created_at).toLocaleTimeString()+'</time>':'Project created — waiting for its first build event.')+'</div><div class="project-links">'+repo+(p.worker_name?'<span class="meta">Worker: '+esc(p.worker_name)+'</span>':'')+retry+'</div></article>'}).join('')}
-async function refresh(){try{const [c,p]=await Promise.all([api('/connections'),api('/projects')]);const connected=new Set(c.connections.map(x=>x.provider));for(const provider of ['github','cloudflare']){const node=$('#'+provider);const yes=connected.has(provider);node.textContent=yes?'Connected and ready':'Not connected';node.className='state '+(yes?'ok':'wait')}projects=p.projects;render()}catch(e){$('#status').textContent=e.message}finally{clearTimeout(refreshTimer);refreshTimer=setTimeout(refresh,projects.some(p=>!['live','failed','needs_connections'].includes(p.status))?2000:12000)}}
+async function refresh(){try{const [c,p]=await Promise.all([api('/connections'),api('/projects')]);const connections=new Map(c.connections.map(x=>[x.provider,x]));for(const provider of ['github','cloudflare']){const node=$('#'+provider),connection=connections.get(provider),expired=connection?.token_expires_at&&Date.parse(connection.token_expires_at)<=Date.now()+60000,yes=!!connection&&!expired;node.textContent=yes?'Connected and ready':expired?'Reconnect required (token expired)':'Not connected';node.className='state '+(yes?'ok':'wait')}projects=p.projects;render()}catch(e){$('#status').textContent=e.message}finally{clearTimeout(refreshTimer);refreshTimer=setTimeout(refresh,projects.some(p=>!['live','failed','needs_connections'].includes(p.status))?2000:12000)}}
 async function createProject(){const status=$('#status'),button=$('#create');status.textContent='Creating project record…';button.disabled=true;try{const d=await api('/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#name').value,prompt:$('#prompt').value})});status.textContent='Created '+d.project.name+'. Watch its build board below.';$('#name').value='';$('#prompt').value='';await refresh()}catch(e){status.textContent=e.message}finally{button.disabled=false}}
 async function retryBuild(id){$('#status').textContent='Re-queuing build…';try{await api('/projects/'+id+'/build',{method:'POST'});$('#status').textContent='Build re-queued. Watching its progress below.';await refresh()}catch(e){$('#status').textContent=e.message}}
 (async()=>{try{await api('/session',{method:'POST'})}catch(e){$('#status').textContent=e.message}refresh()})();
@@ -309,7 +315,9 @@ async function retryBuild(id){$('#status').textContent='Re-queuing build…';try
 }
 
 async function connectionProviders(env: Env, ownerId: string): Promise<Set<string>> {
-  const result = await env.DB.prepare('SELECT provider FROM connections WHERE owner_id = ? AND status = ?').bind(ownerId, 'connected').all<{ provider: string }>();
+  const result = await env.DB.prepare('SELECT provider FROM connections WHERE owner_id = ? AND status = ? AND (token_expires_at IS NULL OR token_expires_at > ?)')
+    .bind(ownerId, 'connected', new Date(Date.now() + 60_000).toISOString())
+    .all<{ provider: string }>();
   return new Set(result.results.map((connection) => connection.provider));
 }
 
@@ -334,7 +342,7 @@ async function recordEvent(env: Env, projectId: string, kind: string, detail: st
 }
 
 async function buildStandaloneApp(env: Env, projectId: string): Promise<void> {
-  const project = await env.DB.prepare('SELECT id, owner_id, name, prompt FROM projects WHERE id = ?').bind(projectId).first<ProjectRecord>();
+  const project = await env.DB.prepare('SELECT id, owner_id, name, prompt, github_repository, worker_name FROM projects WHERE id = ?').bind(projectId).first<ProjectRecord>();
   if (!project) throw new Error('Project no longer exists');
   if (!env.CLOUDFLARE_ACCOUNT_ID) throw new Error('Cloudflare account is not configured on the control plane');
 
@@ -344,25 +352,28 @@ async function buildStandaloneApp(env: Env, projectId: string): Promise<void> {
   ]);
   const suffix = project.id.replaceAll('-', '').slice(0, 8);
   const repositoryName = `${safeSlug(project.name, 'app')}-${suffix}`;
-  const workerName = `vela-${safeSlug(project.name, 'app')}-${suffix}`;
+  const workerName = project.worker_name ?? `vela-${safeSlug(project.name, 'app')}-${suffix}`;
   const now = new Date().toISOString();
-
-  await env.DB.prepare('UPDATE projects SET status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind('creating_repository', workerName, now, project.id).run();
-  await recordEvent(env, project.id, 'repository_started', `Creating private GitHub repository ${repositoryName}`);
-  const githubUser = await githubRequest<{ login: string }>(github.accessToken, '/user');
-  const repository = await githubRequest<{ full_name: string }>(github.accessToken, '/user/repos', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: repositoryName, description: project.prompt.slice(0, 160), private: true, has_issues: true, has_projects: true }),
-  });
-
   const source = standaloneWorkerSource(project.name, project.prompt);
-  const wrangler = JSON.stringify({ name: workerName, main: 'src/worker.mjs', compatibility_date: '2026-08-25' }, null, 2) + '\n';
-  await putGithubFile(github.accessToken, repository.full_name, 'README.md', `# ${project.name}\n\n${project.prompt}\n\nThis is a standalone Cloudflare Worker created by Vela.\n`, 'Add project README');
-  await putGithubFile(github.accessToken, repository.full_name, 'src/worker.mjs', source, 'Add standalone Worker');
-  await putGithubFile(github.accessToken, repository.full_name, 'wrangler.json', wrangler, 'Add Worker configuration');
-  await env.DB.prepare('UPDATE projects SET github_repository = ?, status = ?, updated_at = ? WHERE id = ?').bind(repository.full_name, 'deploying', new Date().toISOString(), project.id).run();
-  await recordEvent(env, project.id, 'repository_created', `Private repository ${repository.full_name} created`);
+
+  if (!project.github_repository) {
+    await env.DB.prepare('UPDATE projects SET status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind('creating_repository', workerName, now, project.id).run();
+    await recordEvent(env, project.id, 'repository_started', `Creating private GitHub repository ${repositoryName}`);
+    const repository = await githubRequest<{ full_name: string }>(github.accessToken, '/user/repos', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: repositoryName, description: project.prompt.slice(0, 160), private: true, has_issues: true, has_projects: true }),
+    });
+    const wrangler = JSON.stringify({ name: workerName, main: 'src/worker.mjs', compatibility_date: '2026-08-25' }, null, 2) + '\n';
+    await putGithubFile(github.accessToken, repository.full_name, 'README.md', `# ${project.name}\n\n${project.prompt}\n\nThis is a standalone Cloudflare Worker created by Vela.\n`, 'Add project README');
+    await putGithubFile(github.accessToken, repository.full_name, 'src/worker.mjs', source, 'Add standalone Worker');
+    await putGithubFile(github.accessToken, repository.full_name, 'wrangler.json', wrangler, 'Add Worker configuration');
+    await env.DB.prepare('UPDATE projects SET github_repository = ?, status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind(repository.full_name, 'deploying', workerName, new Date().toISOString(), project.id).run();
+    await recordEvent(env, project.id, 'repository_created', `Private repository ${repository.full_name} created`);
+  } else {
+    await env.DB.prepare('UPDATE projects SET status = ?, worker_name = ?, updated_at = ? WHERE id = ?').bind('deploying', workerName, now, project.id).run();
+    await recordEvent(env, project.id, 'repository_reused', `Reusing existing repository ${project.github_repository} for this deployment retry`);
+  }
 
   await deployStandaloneWorker(cloudflare.accessToken, env.CLOUDFLARE_ACCOUNT_ID, workerName, source);
   await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('live', new Date().toISOString(), project.id).run();
@@ -456,7 +467,7 @@ export default {
     const sessionId = await readSession(request, env.SESSION_SECRET);
     if (url.pathname === '/connections' && request.method === 'GET') {
       if (!sessionId) return json({ error: 'Connect an account first.' }, { status: 401 });
-      const connections = await env.DB.prepare('SELECT provider, external_account_id, status, updated_at FROM connections WHERE owner_id = ? ORDER BY provider').bind(sessionId).all();
+      const connections = await env.DB.prepare('SELECT provider, external_account_id, status, token_expires_at, updated_at FROM connections WHERE owner_id = ? ORDER BY provider').bind(sessionId).all();
       return json({ connections: connections.results });
     }
 
