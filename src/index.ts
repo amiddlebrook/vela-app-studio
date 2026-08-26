@@ -146,6 +146,53 @@ type ScaffoldResult = {
   instructions: string;
 };
 
+type PlanResult = {
+  name: string;
+  description: string;
+  features: string[];
+  techStack: string[];
+  estimatedSteps: string[];
+};
+
+async function planAppWithLLM(prompt: string, model?: string): Promise<PlanResult> {
+  const systemPrompt = `You are Vela, an expert app architect. Given a user's app idea, produce a clear, structured MVP plan.
+
+Output EXACTLY this JSON format and nothing else:
+{
+  "name": "App Name",
+  "description": "1-2 sentence description of what the app does and who it's for",
+  "features": ["feature 1", "feature 2", "feature 3", ...],
+  "techStack": ["Cloudflare Workers", "D1 Database", "React", ...],
+  "estimatedSteps": ["Step 1 description", "Step 2 description", ...]
+}
+
+Rules:
+- Features: 4-8 concrete, buildable features for an MVP
+- TechStack: Always include Cloudflare Workers + D1; add others as appropriate
+- EstimatedSteps: 3-6 clear build steps the system will follow
+- Keep it practical and focused on what can actually be built
+- Output ONLY the JSON object, no markdown, no explanation
+
+User idea: ${prompt}`;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Plan this app: ${prompt}` },
+  ];
+
+  let content: string;
+  if (env.OPENROUTER_API_KEY) {
+    content = await callOpenRouter(messages, model);
+  } else {
+    throw new Error('No LLM provider configured');
+  }
+
+  // Extract JSON from response (handle markdown code blocks)
+  const jsonMatch = content.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('LLM did not return valid JSON plan');
+  return JSON.parse(jsonMatch[0]) as PlanResult;
+}
+
 async function scaffoldAppWithLLM(prompt: string, model?: string): Promise<ScaffoldResult> {
   const systemPrompt = `You are Vela, an agentic full-stack app builder. Given a natural language prompt, generate a complete, production-ready full-stack application.
 
@@ -425,23 +472,101 @@ function builderDashboard(): Response {
   const body = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vela Control Plane</title>
 <style>
-:root{--bg:#080910;--card:#111522;--line:#2a3150;--ink:#f0f3ff;--muted:#99a2c4;--blue:#9cadff;--mint:#90ebc1;--amber:#ffc978}*{box-sizing:border-box}body{margin:0;background:radial-gradient(900px 500px at 88% -10%,#2a3f8255,transparent 65%),radial-gradient(680px 460px at -8% 24%,#493a7855,transparent 68%),var(--bg);color:var(--ink);font:15px ui-sans-serif,system-ui,sans-serif}main{max-width:1180px;margin:auto;padding:36px 22px 90px}.top{display:flex;justify-content:space-between;gap:18px;align-items:start}.eyebrow{color:#aebcff;font-size:11px;letter-spacing:.18em;text-transform:uppercase}.top h1{font-size:clamp(42px,7vw,78px);letter-spacing:-.07em;line-height:.88;margin:12px 0}.top p{max-width:560px;color:var(--muted);line-height:1.55}.signal{min-width:215px;border:1px solid #42588b;border-radius:18px;padding:14px 16px;background:#121a31cc}.signal b{display:block;font-size:20px;margin:5px 0}.live-dot{display:inline-block;width:8px;height:8px;background:var(--mint);box-shadow:0 0 16px var(--mint);border-radius:50%;margin-right:7px}.grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(300px,.88fr);gap:16px;margin-top:26px}.card{background:linear-gradient(145deg,#151a2aee,#0c0e17ee);border:1px solid var(--line);border-radius:22px;padding:21px;box-shadow:0 24px 70px #0003}.wide{grid-column:1/-1}.card h2{font-size:17px;margin:0 0 14px}.prompt{font-size:17px;min-height:130px;resize:vertical}input,textarea{width:100%;border:1px solid #363e61;border-radius:13px;background:#090b14;color:var(--ink);font:inherit;padding:13px;margin:0 0 10px}button{border:0;border-radius:999px;background:var(--blue);color:#11172b;padding:11px 16px;font-weight:800;cursor:pointer}button.secondary{background:#202844;color:var(--ink)}button:disabled{opacity:.52;cursor:default}.hint,.meta{color:var(--muted);font-size:12px;line-height:1.5}.connections{display:grid;gap:8px}.connection{display:flex;align-items:center;justify-content:space-between;border:1px solid #2b3353;border-radius:14px;padding:12px}.state{font-size:12px;color:var(--muted)}.state.ok{color:var(--mint)}.state.wait{color:var(--amber)}.build-list{display:grid;gap:12px}.empty{border:1px dashed #34405f;border-radius:16px;padding:32px;color:var(--muted);text-align:center}.project{border:1px solid #2c3453;border-radius:18px;padding:17px;background:#0c0f1b}.project-top{display:flex;justify-content:space-between;gap:16px}.project h3{font-size:18px;margin:0 0 5px}.badge{font-size:11px;padding:6px 9px;border-radius:99px;background:#1e2744;color:#bec9f6;white-space:nowrap}.badge.active{background:#233c55;color:#9decc8}.badge.live{background:#214435;color:#a6f3cc}.badge.failed{background:#512c38;color:#ffc0cc}.steps{display:flex;gap:3px;margin:16px 0 10px}.step{height:5px;border-radius:9px;flex:1;background:#242b43}.step.done{background:var(--mint)}.step.now{background:var(--amber);box-shadow:0 0 12px #ffc97899}.activity{border-top:1px solid #27304d;padding-top:11px;color:#cbd3ef;font-size:13px}.activity time{color:var(--muted);margin-left:6px}.project-links{display:flex;gap:12px;margin-top:10px}.project-links a{color:#b8c7ff;font-size:12px}.pulse{animation:pulse 1.55s ease-in-out infinite}@keyframes pulse{50%{opacity:.48;transform:scale(.82)}}@media(max-width:760px){.top{flex-direction:column}.signal{width:100%}.grid{grid-template-columns:1fr}.wide{grid-column:auto}.project-top{flex-direction:column}}
+:root{--bg:#070a12;--card:#0f1322;--line:#252d4a;--ink:#eef1ff;--muted:#8892b8;--blue:#8ba4ff;--mint:#6ee8b0;--amber:#ffc46a;--red:#ff6b6b}
+*{box-sizing:border-box;margin:0}
+body{background:radial-gradient(ellipse at 85% -15%,#1e2e6222,transparent 55%),radial-gradient(ellipse at -10% 20%,#35255c22,transparent 55%),var(--bg);color:var(--ink);font:15px ui-sans-serif,system-ui,sans-serif;min-height:100vh}
+main{max-width:1120px;margin:auto;padding:36px 22px 90px}
+.top{display:flex;justify-content:space-between;align-items:start;gap:20px}
+.eyebrow{font-size:10px;color:var(--blue);letter-spacing:.2em;text-transform:uppercase;margin-bottom:6px}
+h1{font-size:clamp(42px,7vw,76px);letter-spacing:-.06em;line-height:.88;margin:10px 0 0}
+.desc{color:var(--muted);max-width:480px;line-height:1.5;margin-top:6px}
+.signal-box{min-width:190px;border:1px solid #37426a;border-radius:16px;padding:13px 16px;background:#0d121fcc;flex-shrink:0}
+.pulse-dot{width:8px;height:8px;background:var(--mint);box-shadow:0 0 14px var(--mint);border-radius:50%;display:inline-block;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.signal-box b{display:block;font-size:18px;margin:5px 0 2px}
+.signal-box .sub{color:var(--muted);font-size:11px}
+.grid{display:grid;grid-template-columns:1.1fr .9fr;gap:16px;margin-top:26px}
+.card{background:linear-gradient(150deg,#13182bee,#0b0d16ee);border:1px solid var(--line);border-radius:22px;padding:22px;box-shadow:0 0 40px rgba(139,164,255,.06)}
+.wide{grid-column:1/-1}
+h2{font-size:17px;margin:0 0 14px;font-weight:750}
+input,textarea{width:100%;border:1px solid #333c5f;border-radius:13px;background:#080b15;color:var(--ink);font:inherit;padding:12px 14px;margin:0 0 10px;outline:none;transition:border .2s}
+input:focus,textarea:focus{border-color:var(--blue)}
+textarea{resize:vertical;min-height:110px}
+button{border:0;border-radius:999px;background:var(--blue);color:#090e22;padding:11px 18px;font-weight:800;cursor:pointer;transition:all .18s}
+button:hover{filter:brightness(1.1);transform:translateY(-1px)}
+button.secondary{background:#1c2440;color:var(--ink)}
+button:disabled{opacity:.45;cursor:default;transform:none}
+button.green{background:var(--mint);color:#061510}
+button.red{background:var(--red);color:#1a0505}
+.hint{color:var(--muted);font-size:12px;line-height:1.5;margin-top:8px}
+.connections{display:grid;gap:8px}
+.connection{display:flex;align-items:center;justify-content:space-between;border:1px solid #2a3252;border-radius:14px;padding:13px 16px;background:#0b0f1a}
+.connection strong{font-size:14px}
+.state{font-size:12px;margin-top:2px}
+.state.ok{color:var(--mint)}
+.state.wait{color:var(--amber)}
+.project{border-bottom:1px solid var(--line);padding:18px 0}
+.project:last-child{border-bottom:0}
+.proj-header{display:flex;justify-content:space-between;align-items:start;gap:12px}
+.proj-header h3{font-size:16px;margin:0}
+.badge{font-size:11px;padding:5px 10px;border-radius:99px;white-space:nowrap;font-weight:700;border:1px solid transparent}
+.badge.live{color:var(--mint);border-color:#1a3d2a;background:#0a1a14}
+.badge.failed{color:var(--red);border-color:#3d1a1a;background:#1a0a0a}
+.badge.active{color:var(--amber);border-color:#3d321a;background:#1a150a;animation:shimmer 2s infinite}
+.badge.pending{color:#b8a4ff;border-color:#2a1a3d;background:#120a1a}
+@keyframes shimmer{0%,100%{border-color:#3d321a}50%{border-color:#5a4a2a}}
+.meta{color:var(--muted);font-size:12px;margin-top:2px}
+.steps{display:flex;gap:5px;margin:12px 0 10px;align-items:center}
+.step{width:22px;height:4px;border-radius:3px;background:#1c2440;transition:background .3s}
+.step.done{background:var(--mint)}
+.step.now{background:var(--amber);animation:glow 1.2s infinite alternate}
+@keyframes glow{from{box-shadow:0 0 4px var(--amber)}to{box-shadow:0 0 12px var(--amber)}}
+.event{color:var(--muted);font-size:12px;line-height:1.6}
+.event time{opacity:.5;margin-left:6px}
+.links{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.links a{color:var(--blue);text-decoration:none;font-size:13px;border:1px solid #2a3558;border-radius:99px;padding:5px 12px;transition:all .15s}
+.links a:hover{background:#1c2440}
+.plan-card{border:1px solid #3a457a;border-radius:18px;background:linear-gradient(150deg,#161d38ee,#0e101eee);padding:22px;margin-top:16px;animation:slideIn .35s ease-out}
+@keyframes slideIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.plan-title{font-size:20px;font-weight:800;margin-bottom:4px}
+.plan-desc{color:var(--muted);line-height:1.55;margin-bottom:16px}
+.plan-section{margin-bottom:14px}
+.plan-section h4{font-size:11px;color:var(--blue);letter-spacing:.14em;text-transform:uppercase;margin-bottom:7px}
+.plan-list{list-style:none;padding:0;margin:0}
+.plan-list li{padding:5px 0;font-size:13px;color:var(--ink);display:flex;align-items:start;gap:8px}
+.plan-list li::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--mint);margin-top:6px;flex-shrink:0}
+.tag{display:inline-block;border:1px solid #333c5f;border-radius:99px;padding:3px 9px;font-size:11px;margin:3px 4px 3px 0;color:var(--muted)}
+.plan-actions{display:flex;gap:10px;margin-top:18px}
+.prompt-overlay{display:none;position:fixed;inset:0;background:#070a12dd;z-index:100;justify-content:center;align-items:center;backdrop-filter:blur(6px)}
+.prompt-overlay.open{display:flex}
+.prompt-box{background:#0f1322;border:1px solid var(--line);border-radius:22px;padding:28px;width:90%;max-width:540px;animation:slideIn .25s ease-out}
+.prompt-box h2{margin-bottom:14px}
+.typing{display:inline-flex;gap:4px;align-items:center;padding:6px 0}
+.typing span{width:5px;height:5px;background:var(--blue);border-radius:50%;animation:typing 1.2s infinite}
+.typing span:nth-child(2){animation-delay:.2s}
+.typing span:nth-child(3){animation-delay:.4s}
+@keyframes typing{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:1;transform:translateY(-3px)}}
+@media(max-width:780px){.grid{grid-template-columns:1fr}.top{flex-direction:column}}
 </style></head><body><main>
-<header class="top"><div><div class="eyebrow">Vela / app creation control</div><h1>See every build<br>become real.</h1><p>Every project is a separate GitHub repository and Cloudflare Worker. This screen reports the actual records written as each step happens.</p></div><aside class="signal"><span class="live-dot"></span>Live build signals<b id="activeCount">Checking…</b><span class="meta" id="signalText">Reading your workspace</span></aside></header>
-<section class="grid"><article class="card"><h2>Describe the app</h2><input id="name" maxlength="80" placeholder="App name"><textarea id="prompt" class="prompt" maxlength="4000" placeholder="What should this app do, for whom, and what should it feel like?"></textarea><button id="create" onclick="createProject()">Create this app</button><p id="status" class="hint"></p><p class="hint">Once both connections are live, this queues a real build automatically.</p></article><article class="card"><h2>Launch access</h2><div class="connections"><div class="connection"><div><strong>GitHub</strong><div id="github" class="state">Checking…</div></div><button class="secondary" onclick="location.href='/auth/github/start'">Connect</button></div><div class="connection"><div><strong>Cloudflare</strong><div id="cloudflare" class="state">Checking…</div></div><button class="secondary" onclick="location.href='/auth/cloudflare/start'">Connect</button></div></div><p class="hint">GitHub holds each app’s isolated source repository. Cloudflare runs each app independently.</p></article><section class="card wide"><h2>Your build board</h2><div class="build-list" id="projects"><div class="empty">Loading build records…</div></div></section></section></main>
+<header class="top"><div><div class="eyebrow">Vela / app creation control</div><h1>See every build<br>become real.</h1><p class="desc">Every project is a separate GitHub repo and Cloudflare Worker. Describe your app, review the AI plan, approve it, and watch it come to life.</p></div><aside class="signal-box"><span class="pulse-dot"></span><b id="activeCount">Checking…</b><span class="sub" id="signalText">Reading workspace</span></aside></header>
+<section class="grid"><article class="card"><h2>Describe the app</h2><input id="name" maxlength="80" placeholder="App name (e.g. Habit Tracker)"><textarea id="prompt" maxlength="4000" placeholder="What should this app do, for whom, and what should it feel like?"></textarea><button id="create" onclick="createProject()">Create this app</button><p id="status" class="hint"></p><p class="hint">You'll review an AI-generated plan before any code is built.</p></article><article class="card"><h2>Launch access</h2><div class="connections"><div class="connection"><div><strong>GitHub</strong><div id="github" class="state">Checking…</div></div><button class="secondary" onclick="location.href='/auth/github/start'">Connect</button></div><div class="connection"><div><strong>Cloudflare</strong><div id="cloudflare" class="state">Checking…</div></div><button class="secondary" onclick="location.href='/auth/cloudflare/start'">Connect</button></div></div><p class="hint">GitHub holds each app's source repo. Cloudflare runs each app independently.</p></article><section class="card wide"><h2>Your build board</h2><div id="projects"><div class="empty">Loading build records…</div></div></section></section>
+<div class="prompt-overlay" id="promptOverlay"><div class="prompt-box"><h2>Revise your prompt</h2><p class="hint" style="margin-bottom:12px;margin-top:0">Edit the prompt below to generate a new plan.</p><textarea id="editPrompt" rows="5" maxlength="4000"></textarea><input id="editProjectId" type="hidden"><div style="display:flex;gap:10px;margin-top:14px"><button onclick="submitReject()">Generate new plan</button><button class="secondary" onclick="closeOverlay()">Cancel</button></div></div></div>
 <script>
-const $=s=>document.querySelector(s);let projects=[];let refreshTimer;
-const stages=['planning','scaffolding','creating_repository','pushing_files','deploying_worker','enabling_subdomain','live'];
-const labels={needs_connections:'Waiting for connections',planning:'Planning app structure',scaffolding:'AI generating code',creating_repository:'Creating GitHub repository',pushing_files:'Pushing source files',deploying_worker:'Deploying to Cloudflare',enabling_subdomain:'Enabling workers.dev',live:'Live',failed:'Build failed',building:'Building'};
+const $=s=>document.querySelector(s);let projects=[],refreshTimer;
+const stages=['planning','awaiting_approval','scaffolding','creating_repository','pushing_files','deploying_worker','enabling_subdomain','live'];
+const labels={needs_connections:'Waiting for connections',planning:'Planning app structure',awaiting_approval:'Awaiting your approval',scaffolding:'AI generating code',creating_repository:'Creating GitHub repository',pushing_files:'Pushing source files',deploying_worker:'Deploying to Cloudflare',enabling_subdomain:'Enabling workers.dev',live:'Live',failed:'Build failed',building:'Building'};
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.reason||d.error||'Request failed');return d}
-function statusClass(s){return s==='live'?'live':s==='failed'?'failed':s==='needs_connections'?'':'active'}
-function render(){const active=projects.filter(p=>!['live','failed','needs_connections'].includes(p.status));$('#activeCount').textContent=active.length?active.length+' build'+(active.length===1?'':'s')+' active':'No active builds';$('#signalText').textContent=active.length?'Auto-refreshing every 2 seconds':'Build events stay attached to each project';const root=$('#projects');if(!projects.length){root.innerHTML='<div class="empty">No builds yet. Describe an app above and its creation timeline will appear here.</div>';return}root.innerHTML=projects.map(p=>{const step=stages.indexOf(p.status);const dots=stages.map((stage,i)=>'<i class="step '+(i<step?'done':i===step&&step>=0&&p.status!=='live'?'now pulse':i===step&&p.status==='live'?'done':'')+'"></i>').join('');const event=p.latest_event;const repo=p.github_repository?'<a target="_blank" rel="noreferrer" href="https://github.com/'+esc(p.github_repository)+'">Open repo ↗</a>':'';const appLink=p.worker_name&&p.status==='live'?'<a target="_blank" rel="noreferrer" href="https://'+esc(p.worker_name)+'.workers.dev">Open app ↗</a>':'';const retry=p.status==='failed'?'<button class="secondary" onclick="retryBuild(&quot;'+p.id+'&quot;)">Retry build</button>':'';const modify=p.status==='live'||p.status==='failed'?'<button class="secondary" onclick="modifyApp(&quot;'+p.id+'&quot;)">Modify</button>':'';const resume=p.status==='failed'?'<button class="secondary" onclick="resumeBuild(&quot;'+p.id+'&quot;)">Resume from last good stage</button>':'';return '<article class="project"><div class="project-top"><div><h3>'+esc(p.name)+'</h3><div class="meta">'+esc(labels[p.status]||p.status)+' · updated '+new Date(p.updated_at).toLocaleTimeString()+'</div></div><span class="badge '+statusClass(p.status)+'">'+esc(labels[p.status]||p.status)+'</span></div><div class="steps" title="Plan → AI → Repo → Files → Deploy → Subdomain → Live">'+dots+'</div><div class="activity">'+(event?esc(event.detail)+'<time>'+new Date(event.created_at).toLocaleTimeString()+'</time>':'Project created — waiting for its first build event.')+'</div><div class="project-links">'+repo+appLink+retry+resume+modify+'</div></article>'}).join('')}
-async function refresh(){try{const [c,p]=await Promise.all([api('/connections'),api('/projects')]);const connections=new Map(c.connections.map(x=>[x.provider,x]));for(const provider of ['github','cloudflare']){const node=$('#'+provider),connection=connections.get(provider),expired=connection?.token_expires_at&&Date.parse(connection.token_expires_at)<=Date.now()+60000,yes=!!connection&&!expired;node.textContent=yes?'Connected and ready':expired?'Reconnect required (token expired)':'Not connected';node.className='state '+(yes?'ok':'wait')}projects=p.projects;render()}catch(e){$('#status').textContent=e.message}finally{clearTimeout(refreshTimer);refreshTimer=setTimeout(refresh,projects.some(p=>!['live','failed','needs_connections'].includes(p.status))?2000:12000)}}
-async function createProject(){const status=$('#status'),button=$('#create');status.textContent='Creating project record…';button.disabled=true;try{const d=await api('/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#name').value,prompt:$('#prompt').value})});status.textContent='Created '+d.project.name+'. Watch its build board below.';$('#name').value='';$('#prompt').value='';await refresh()}catch(e){status.textContent=e.message}finally{button.disabled=false}}
-async function retryBuild(id){$('#status').textContent='Re-queuing build…';try{await api('/projects/'+id+'/build',{method:'POST'});$('#status').textContent='Build re-queued. Watching its progress below.';await refresh()}catch(e){$('#status').textContent=e.message}}
-async function resumeBuild(id){$('#status').textContent='Resuming from last good stage…';try{await api('/projects/'+id+'/build',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({resumeFrom:'scaffolding'})});$('#status').textContent='Build resumed. Watching its progress below.';await refresh()}catch(e){$('#status').textContent=e.message}}
-async function modifyApp(id){const newPrompt=prompt('Enter updated prompt for this app:');if(!newPrompt||!newPrompt.trim())return;$('#status').textContent='Updating and rebuilding…';try{await api('/projects/'+id+'/build',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({prompt:newPrompt})});$('#status').textContent='App updated and rebuilding. Watching its progress below.';$('#name').value='';$('#prompt').value='';await refresh()}catch(e){$('#status').textContent=e.message}}
+async function api(p,o){const r=await fetch(p,o);const d=await r.json();if(!r.ok)throw Error(d.reason||d.error||'Request failed');return d}
+function statusBadge(s){return s==='live'?'live':s==='failed'?'failed':s==='awaiting_approval'?'pending':'active'}
+function render(){const active=projects.filter(p=>!['live','failed','needs_connections'].includes(p.status));$('#activeCount').textContent=active.length?active.length+' build'+(active.length===1?'':'s')+' active':'No active builds';$('#signalText').textContent=active.length?'Auto-refreshing every 2 s':'Build events stay attached to each project';const root=$('#projects');if(!projects.length){root.innerHTML='<div class="empty" style="padding:28px 0;color:var(--muted);text-align:center">No builds yet. Describe an app above and its creation timeline will appear here.</div>';return}root.innerHTML=projects.map(p=>{const step=stages.indexOf(p.status);const dots=stages.map((s,i)=>'<i class="step '+(i<step||(s==='live'&&p.status==='live')?'done':i===step&&p.status!=='live'&&p.status!=='failed'?'now':'')+'"></i>').join('');const ev=p.latest_event;const appLink=p.worker_name&&p.status==='live'?'<a target="_blank" rel="noreferrer" href="https://'+esc(p.worker_name)+'.workers.dev">Open app \u2197</a>':'';const repoLink=p.github_repository?'<a target="_blank" rel="noreferrer" href="https://github.com/'+esc(p.github_repository)+'">Repo \u2197</a>':'';const retryBtn=p.status==='failed'?'<button class="secondary" onclick="retryBuild(\&quot;'+p.id+'&\quot;)" style="font-size:12px;padding:6px 12px">Retry</button>':'';const modifyBtn=(p.status==='live'||p.status==='failed')?'<button class="secondary" onclick="openReject(\&quot;'+p.id+'&\quot;)" style="font-size:12px;padding:6px 12px">Modify</button>':'';const resumeBtn=p.status==='failed'?'<button class="secondary" onclick="resumeBuild(\&quot;'+p.id+'&\quot;)" style="font-size:12px;padding:6px 12px">Resume</button>':'';let planCard='';if(p.status==='awaiting_approval'&&p.plan_json){const plan=JSON.parse(p.plan_json);const featureList=(plan.features||[]).map(f=>'<li>'+esc(f)+'</li>').join('');const techTags=(plan.techStack||[]).map(t=>'<span class="tag">'+esc(t)+'</span>').join('');const stepList=(plan.estimatedSteps||[]).map(s=>'<li>'+esc(s)+'</li>').join('');planCard='<div class="plan-card"><div class="plan-title">'+esc(plan.name||p.name)+'</div><div class="plan-desc">'+esc(plan.description||p.prompt)+'</div><div class="plan-section"><h4>Features</h4><ul class="plan-list">'+featureList+'</ul></div><div class="plan-section"><h4>Tech Stack</h4>'+techTags+'</div><div class="plan-section"><h4>Build Steps</h4><ul class="plan-list">'+stepList+'</ul></div><div class="plan-actions"><button class="green" onclick="approvePlan(\&quot;'+p.id+'&\quot;)">\u2713 Approve &amp; build</button><button class="red" onclick="openReject(\&quot;'+p.id+'&\quot;)">\u2715 Reject</button></div></div>'}const typing=(p.status==='planning'||p.status==='building')?'<div class="typing"><span></span><span></span><span></span></div>':'';return '<article class="project"><div class="proj-header"><div><h3>'+esc(p.name)+'</h3><div class="meta">'+esc(labels[p.status]||p.status)+' \u00b7 '+new Date(p.updated_at).toLocaleTimeString()+'</div></div><span class="badge '+statusBadge(p.status)+'">'+esc(labels[p.status]||p.status)+'</span></div><div class="steps">'+dots+'</div>'+typing+planCard+(ev?'<div class="event">'+esc(ev.detail)+'<time>'+new Date(ev.created_at).toLocaleTimeString()+'</time></div>':'')+(appLink||repoLink?'<div class="links">'+repoLink+appLink+'</div>':'')+(retryBtn||modifyBtn||resumeBtn?'<div style="display:flex;gap:8px;margin-top:10px">'+retryBtn+modifyBtn+resumeBtn+'</div>':'')+'</article>'}).join('')}
+async function refresh(){try{const[c,p]=await Promise.all([api('/connections'),api('/projects')]);const conns=new Map(c.connections.map(x=>[x.provider,x]));for(const provider of['github','cloudflare']){const node=$('#'+provider),conn=conns.get(provider);const expired=conn?.token_expires_at&&Date.parse(conn.token_expires_at)<=Date.now()+60000;const ok=!!conn&&!expired;node.textContent=ok?'Connected and ready':expired?'Reconnect required':'Not connected';node.className='state '+(ok?'ok':'wait')}projects=p.projects;render()}catch(e){$('#status').textContent=e.message}finally{clearTimeout(refreshTimer);const hasActive=projects.some(p=>!['live','failed','needs_connections'].includes(p.status));refreshTimer=setTimeout(refresh,hasActive?2000:10000)}}
+async function createProject(){const status=$('#status'),btn=$('#create');status.textContent='Creating project\u2026';btn.disabled=true;try{const d=await api('/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#name').value,prompt:$('#prompt').value})});status.textContent='Created '+d.project.name+'. Plan is being generated\u2026';$('#name').value='';$('#prompt').value='';await refresh()}catch(e){status.textContent=e.message}finally{btn.disabled=false}}
+async function approvePlan(id){$('#status').textContent='Approving plan and starting build\u2026';try{await api('/projects/'+id+'/approve',{method:'POST'});$('#status').textContent='Build started!';await refresh()}catch(e){$('#status').textContent=e.message}}
+function openReject(id){const p=projects.find(x=>x.id===id);if(!p)return;$('#editProjectId').value=id;$('#editPrompt').value=p.prompt;$('#promptOverlay').classList.add('open')}
+function closeOverlay(){$('#promptOverlay').classList.remove('open')}
+async function submitReject(){const id=$('#editProjectId').value;const prompt=$('#editPrompt').value.trim();if(!prompt)return;closeOverlay();$('#status').textContent='Submitting revised prompt\u2026';try{await api('/projects/'+id+'/reject',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({prompt})});$('#status').textContent='New plan being generated\u2026';await refresh()}catch(e){$('#status').textContent=e.message}}
+async function retryBuild(id){$('#status').textContent='Re-queuing build\u2026';try{await api('/projects/'+id+'/build',{method:'POST'});$('#status').textContent='Build re-queued.';await refresh()}catch(e){$('#status').textContent=e.message}}
+async function resumeBuild(id){$('#status').textContent='Resuming from last good stage\u2026';try{await api('/projects/'+id+'/build',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({resumeFrom:'scaffolding'})});$('#status').textContent='Build resumed.';await refresh()}catch(e){$('#status').textContent=e.message}}
 (async()=>{try{await api('/session',{method:'POST'})}catch(e){$('#status').textContent=e.message}refresh})();
 </script></body></html>`;
   return new Response(body, { headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })) });
@@ -474,7 +599,7 @@ async function recordEvent(env: Env, projectId: string, kind: string, detail: st
   await env.DB.prepare('INSERT INTO build_events (id, project_id, kind, detail, stage, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), projectId, kind, detail, stage, new Date().toISOString()).run();
 }
 
-const BUILD_STAGES = ['planning', 'scaffolding', 'creating_repository', 'pushing_files', 'deploying_worker', 'enabling_subdomain', 'live'] as const;
+const BUILD_STAGES = ['planning', 'awaiting_approval', 'scaffolding', 'creating_repository', 'pushing_files', 'deploying_worker', 'enabling_subdomain', 'live'] as const;
 
 async function buildStandaloneApp(env: Env, projectId: string, resumeFrom?: string): Promise<void> {
   const project = await env.DB.prepare('SELECT id, owner_id, name, prompt, github_repository, worker_name FROM projects WHERE id = ?').bind(projectId).first<ProjectRecord>();
@@ -498,20 +623,46 @@ async function buildStandaloneApp(env: Env, projectId: string, resumeFrom?: stri
     await recordEvent(env, projectId, 'build_started', 'Planning app structure and generating full-stack code', 'planning');
   }
 
+  let plan: PlanResult | null = null;
   let source: string;
   let scaffolding: {frontend: string; backend: string; database: string; config: string; instructions: string} = { frontend: '', backend: '', database: '', config: '', instructions: '' };
+
+  // --- Stage 1: Planning → planAppWithLLM → awaiting_approval ---
+  if (!shouldSkip('planning')) {
+    await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('planning', new Date().toISOString(), projectId).run();
+    await recordEvent(env, projectId, 'plan_started', 'Generating MVP plan with AI…', 'planning');
+    try {
+      plan = await planAppWithLLM(project.prompt, env.OPENROUTER_MODEL);
+      await env.DB.prepare('UPDATE projects SET plan_json = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(plan), new Date().toISOString(), projectId).run();
+      await recordEvent(env, projectId, 'plan_generated', `Plan ready: ${plan.features.length} features, ${plan.techStack.length} tech items`, 'planning');
+      // PAUSE: await user approval before scaffolding
+      await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('awaiting_approval', new Date().toISOString(), projectId).run();
+      await recordEvent(env, projectId, 'awaiting_approval', 'Plan generated — waiting for user approval', 'awaiting_approval');
+      return; // stop here; queue consumer will ack, build resumes on approve
+    } catch (err) {
+      console.warn('Plan generation failed, skipping approval:', (err as Error).message);
+      await recordEvent(env, projectId, 'plan_failed', (err as Error).message, 'planning');
+      // fall through to scaffolding without a plan
+    }
+  } else if (!shouldSkip('scaffolding')) {
+    // resumed from scaffolding — load saved plan if any
+    const existing = await env.DB.prepare('SELECT plan_json FROM projects WHERE id = ?').bind(projectId).first<{ plan_json: string | null }>();
+    plan = existing?.plan_json ? JSON.parse(existing.plan_json) : null;
+  }
+
+  // --- Stage 2: Scaffolding (AI code generation) ---
   if (!shouldSkip('scaffolding')) {
     await recordEvent(env, projectId, 'scaffolding_started', 'AI agent generating frontend, backend, database schema, and config', 'scaffolding');
     try {
       scaffolding = await scaffoldAppWithLLM(project.prompt, env.OPENROUTER_MODEL);
       source = scaffolding.backend;
-      await env.DB.prepare('UPDATE projects SET scaffolding_json = ? WHERE id = ?').bind(JSON.stringify(scaffolding), project.id).run();
+      await env.DB.prepare('UPDATE projects SET scaffolding_json = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(scaffolding), project.id).run();
       await recordEvent(env, projectId, 'scaffolding_complete', `Generated ${scaffolding.backend.length} chars backend, ${scaffolding.frontend.length} chars frontend, ${scaffolding.database.length} chars schema`, 'scaffolding');
     } catch (llmError) {
       console.warn('Agentic LLM scaffolding failed, falling back to standalone worker source:', llmError.message);
       scaffolding = { frontend: '', backend: standaloneWorkerSource(project.name, project.prompt), database: '', config: '', instructions: '' };
       source = scaffolding.backend;
-      await env.DB.prepare('UPDATE projects SET scaffolding_json = ? WHERE id = ?').bind(JSON.stringify(scaffolding), project.id).run();
+      await env.DB.prepare('UPDATE projects SET scaffolding_json = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(scaffolding), project.id).run();
       await recordEvent(env, projectId, 'scaffolding_fallback', `LLM failed (${llmError.message.slice(0, 200)}), using standalone worker`, 'scaffolding');
     }
   } else {
@@ -568,7 +719,7 @@ async function buildStandaloneApp(env: Env, projectId: string, resumeFrom?: stri
 }
 
 async function projectsWithFeatures(env: Env, ownerId: string) {
-  const projects = await env.DB.prepare('SELECT id, name, prompt, github_repository, worker_name, status, scaffolding_json, created_at, updated_at FROM projects WHERE owner_id = ? ORDER BY updated_at DESC').bind(ownerId).all<Record<string, string | null>>();
+  const projects = await env.DB.prepare('SELECT id, name, prompt, github_repository, worker_name, status, scaffolding_json, plan_json, created_at, updated_at FROM projects WHERE owner_id = ? ORDER BY updated_at DESC').bind(ownerId).all<Record<string, string | null>>();
   const features = await env.DB.prepare('SELECT project_id, feature, enabled, updated_at FROM project_features WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?) ORDER BY feature').bind(ownerId).all<{ project_id: string; feature: string; enabled: number; updated_at: string }>();
   const events = await env.DB.prepare('SELECT project_id, kind, detail, created_at FROM build_events WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?) ORDER BY created_at DESC').bind(ownerId).all<{ project_id: string; kind: string; detail: string; created_at: string }>();
   return projects.results.map((project) => ({
@@ -712,6 +863,42 @@ export default {
       return json({ feature: featureMatch[2], enabled: body.enabled });
     }
 
+    const approveMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/approve$/);
+    if (approveMatch && request.method === 'POST') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, approveMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+      if (project.status !== 'awaiting_approval') return json({ error: 'Project is not awaiting approval', currentStatus: project.status }, { status: 409 });
+      const now = new Date().toISOString();
+      await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('planning', now, project.id).run();
+      await recordEvent(env, project.id, 'approved', 'User approved the MVP plan — build continuing', 'planning');
+      await env.BUILD_JOBS.send({ projectId: project.id, prompt: project.prompt, resumeFrom: 'scaffolding' });
+      await recordEvent(env, project.id, 'build_queued', 'Build queued after approval', 'planning');
+      return json({ status: 'planning' }, { status: 202 });
+    }
+
+    const rejectMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/reject$/);
+    if (rejectMatch && request.method === 'POST') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, rejectMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+      if (project.status !== 'awaiting_approval') return json({ error: 'Project is not awaiting approval', currentStatus: project.status }, { status: 409 });
+      const body = await request.json<{ prompt?: string }>().catch(() => ({}));
+      const now = new Date().toISOString();
+      const newPrompt = body.prompt?.trim() || project.prompt;
+      // Update prompt if changed
+      if (body.prompt?.trim()) {
+        await env.DB.prepare('UPDATE projects SET prompt = ?, status = ?, updated_at = ? WHERE id = ?').bind(newPrompt.slice(0, 4000), 'planning', now, project.id).run();
+      } else {
+        await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('planning', now, project.id).run();
+      }
+      await recordEvent(env, project.id, 'rejected', body.prompt?.trim() ? 'User revised prompt and rejected plan — regenerating' : 'User rejected plan — regenerating', 'planning');
+      // Re-run from scratch (planning stage)
+      await env.BUILD_JOBS.send({ projectId: project.id, prompt: newPrompt });
+      await env.BUILDS.getByName(project.id).plan(project.id, newPrompt);
+      return json({ status: 'planning' }, { status: 202 });
+    }
+
     const buildMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/build$/);
     if (buildMatch && request.method === 'POST') {
       if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
@@ -755,6 +942,13 @@ export default {
   async queue(batch: MessageBatch<{ projectId: string; prompt: string; resumeFrom?: string }>, env: Env): Promise<void> {
     for (const message of batch.messages) {
       try {
+        // Check if project is already awaiting approval (plan was generated, build paused)
+        const project = await env.DB.prepare('SELECT status FROM projects WHERE id = ?').bind(message.body.projectId).first<{ status: string }>();
+        if (project?.status === 'awaiting_approval') {
+          await recordEvent(env, message.body.projectId, 'build_paused', 'Build paused — awaiting user approval', 'awaiting_approval');
+          message.ack();
+          continue;
+        }
         await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('building', new Date().toISOString(), message.body.projectId).run();
         await recordEvent(env, message.body.projectId, 'build_queued', message.body.resumeFrom ? `Resuming build from stage: ${message.body.resumeFrom}` : 'Fresh build started', 'building');
         await buildStandaloneApp(env, message.body.projectId, message.body.resumeFrom);
