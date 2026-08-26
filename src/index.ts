@@ -228,9 +228,12 @@ async function providerIdentity(provider: Provider, accessToken: string): Promis
     : provider === 'github'
       ? 'https://api.github.com/user'
       : 'https://dash.cloudflare.com/oauth2/userinfo';
-  const response = await fetch(endpoint, {
-    headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' },
-  });
+  const headers: Record<string, string> = { authorization: `Bearer ${accessToken}`, accept: 'application/json' };
+  if (provider === 'github') {
+    headers['user-agent'] = 'Vela-Control-Plane';
+    headers['x-github-api-version'] = '2022-11-28';
+  }
+  const response = await fetch(endpoint, { headers });
   if (!response.ok) throw new Error('Could not verify provider account');
   const identity = await response.json<{ id?: number | string; sub?: string; email?: string; name?: string; login?: string }>();
   const id = identity.id ?? identity.sub;
