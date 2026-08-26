@@ -265,6 +265,29 @@ function dashboardV3(): Response {
   return new Response(body, { headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })) });
 }
 
+function builderDashboard(): Response {
+  const body = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Vela Control Plane</title>
+<style>
+:root{--bg:#080910;--card:#111522;--line:#2a3150;--ink:#f0f3ff;--muted:#99a2c4;--blue:#9cadff;--mint:#90ebc1;--amber:#ffc978}*{box-sizing:border-box}body{margin:0;background:radial-gradient(900px 500px at 88% -10%,#2a3f8255,transparent 65%),radial-gradient(680px 460px at -8% 24%,#493a7855,transparent 68%),var(--bg);color:var(--ink);font:15px ui-sans-serif,system-ui,sans-serif}main{max-width:1180px;margin:auto;padding:36px 22px 90px}.top{display:flex;justify-content:space-between;gap:18px;align-items:start}.eyebrow{color:#aebcff;font-size:11px;letter-spacing:.18em;text-transform:uppercase}.top h1{font-size:clamp(42px,7vw,78px);letter-spacing:-.07em;line-height:.88;margin:12px 0}.top p{max-width:560px;color:var(--muted);line-height:1.55}.signal{min-width:215px;border:1px solid #42588b;border-radius:18px;padding:14px 16px;background:#121a31cc}.signal b{display:block;font-size:20px;margin:5px 0}.live-dot{display:inline-block;width:8px;height:8px;background:var(--mint);box-shadow:0 0 16px var(--mint);border-radius:50%;margin-right:7px}.grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(300px,.88fr);gap:16px;margin-top:26px}.card{background:linear-gradient(145deg,#151a2aee,#0c0e17ee);border:1px solid var(--line);border-radius:22px;padding:21px;box-shadow:0 24px 70px #0003}.wide{grid-column:1/-1}.card h2{font-size:17px;margin:0 0 14px}.prompt{font-size:17px;min-height:130px;resize:vertical}input,textarea{width:100%;border:1px solid #363e61;border-radius:13px;background:#090b14;color:var(--ink);font:inherit;padding:13px;margin:0 0 10px}button{border:0;border-radius:999px;background:var(--blue);color:#11172b;padding:11px 16px;font-weight:800;cursor:pointer}button.secondary{background:#202844;color:var(--ink)}button:disabled{opacity:.52;cursor:default}.hint,.meta{color:var(--muted);font-size:12px;line-height:1.5}.connections{display:grid;gap:8px}.connection{display:flex;align-items:center;justify-content:space-between;border:1px solid #2b3353;border-radius:14px;padding:12px}.state{font-size:12px;color:var(--muted)}.state.ok{color:var(--mint)}.state.wait{color:var(--amber)}.build-list{display:grid;gap:12px}.empty{border:1px dashed #34405f;border-radius:16px;padding:32px;color:var(--muted);text-align:center}.project{border:1px solid #2c3453;border-radius:18px;padding:17px;background:#0c0f1b}.project-top{display:flex;justify-content:space-between;gap:16px}.project h3{font-size:18px;margin:0 0 5px}.badge{font-size:11px;padding:6px 9px;border-radius:99px;background:#1e2744;color:#bec9f6;white-space:nowrap}.badge.active{background:#233c55;color:#9decc8}.badge.live{background:#214435;color:#a6f3cc}.badge.failed{background:#512c38;color:#ffc0cc}.steps{display:flex;gap:3px;margin:16px 0 10px}.step{height:5px;border-radius:9px;flex:1;background:#242b43}.step.done{background:var(--mint)}.step.now{background:var(--amber);box-shadow:0 0 12px #ffc97899}.activity{border-top:1px solid #27304d;padding-top:11px;color:#cbd3ef;font-size:13px}.activity time{color:var(--muted);margin-left:6px}.project-links{display:flex;gap:12px;margin-top:10px}.project-links a{color:#b8c7ff;font-size:12px}.pulse{animation:pulse 1.55s ease-in-out infinite}@keyframes pulse{50%{opacity:.48;transform:scale(.82)}}@media(max-width:760px){.top{flex-direction:column}.signal{width:100%}.grid{grid-template-columns:1fr}.wide{grid-column:auto}.project-top{flex-direction:column}}
+</style></head><body><main>
+<header class="top"><div><div class="eyebrow">Vela / app creation control</div><h1>See every build<br>become real.</h1><p>Every project is a separate GitHub repository and Cloudflare Worker. This screen reports the actual records written as each step happens.</p></div><aside class="signal"><span class="live-dot"></span>Live build signals<b id="activeCount">Checking…</b><span class="meta" id="signalText">Reading your workspace</span></aside></header>
+<section class="grid"><article class="card"><h2>Describe the app</h2><input id="name" maxlength="80" placeholder="App name"><textarea id="prompt" class="prompt" maxlength="4000" placeholder="What should this app do, for whom, and what should it feel like?"></textarea><button id="create" onclick="createProject()">Create this app</button><p id="status" class="hint"></p><p class="hint">Once both connections are live, this queues a real build automatically.</p></article><article class="card"><h2>Launch access</h2><div class="connections"><div class="connection"><div><strong>GitHub</strong><div id="github" class="state">Checking…</div></div><button class="secondary" onclick="location.href='/auth/github/start'">Connect</button></div><div class="connection"><div><strong>Cloudflare</strong><div id="cloudflare" class="state">Checking…</div></div><button class="secondary" onclick="location.href='/auth/cloudflare/start'">Connect</button></div></div><p class="hint">GitHub holds each app’s isolated source repository. Cloudflare runs each app independently.</p></article><section class="card wide"><h2>Your build board</h2><div class="build-list" id="projects"><div class="empty">Loading build records…</div></div></section></section></main>
+<script>
+const $=s=>document.querySelector(s);let projects=[];let refreshTimer;
+const stages=['planning','building','creating_repository','deploying','live'];
+const labels={needs_connections:'Waiting for connections',planning:'Queued for planning',building:'Preparing app files',creating_repository:'Creating GitHub repository',deploying:'Deploying to Cloudflare',live:'Live',failed:'Build failed'};
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.reason||d.error||'Request failed');return d}
+function statusClass(status){return status==='live'?'live':status==='failed'?'failed':status==='needs_connections'?'':'active'}
+function render(){const active=projects.filter(p=>!['live','failed','needs_connections'].includes(p.status));$('#activeCount').textContent=active.length?active.length+' build'+(active.length===1?'':'s')+' active':'No active builds';$('#signalText').textContent=active.length?'Auto-refreshing every 2 seconds':'Build events stay attached to each project';const root=$('#projects');if(!projects.length){root.innerHTML='<div class="empty">No builds yet. Describe an app above and its creation timeline will appear here.</div>';return}root.innerHTML=projects.map(p=>{const step=stages.indexOf(p.status);const dots=stages.map((stage,i)=>'<i class="step '+(i<step?'done':i===step&&step>=0&&p.status!=='live'?'now pulse':i===step&&p.status==='live'?'done':'')+'"></i>').join('');const event=p.latest_event;const repo=p.github_repository?'<a target="_blank" rel="noreferrer" href="https://github.com/'+esc(p.github_repository)+'">Open repository ↗</a>':'';return '<article class="project"><div class="project-top"><div><h3>'+esc(p.name)+'</h3><div class="meta">'+esc(labels[p.status]||p.status)+' · updated '+new Date(p.updated_at).toLocaleTimeString()+'</div></div><span class="badge '+statusClass(p.status)+'">'+esc(labels[p.status]||p.status)+'</span></div><div class="steps" title="Planning → files → GitHub → Cloudflare → live">'+dots+'</div><div class="activity">'+(event?esc(event.detail)+'<time>'+new Date(event.created_at).toLocaleTimeString()+'</time>':'Project created — waiting for its first build event.')+'</div><div class="project-links">'+repo+(p.worker_name?'<span class="meta">Worker: '+esc(p.worker_name)+'</span>':'')+'</div></article>'}).join('')}
+async function refresh(){try{const [c,p]=await Promise.all([api('/connections'),api('/projects')]);const connected=new Set(c.connections.map(x=>x.provider));for(const provider of ['github','cloudflare']){const node=$('#'+provider);const yes=connected.has(provider);node.textContent=yes?'Connected and ready':'Not connected';node.className='state '+(yes?'ok':'wait')}projects=p.projects;render()}catch(e){$('#status').textContent=e.message}finally{clearTimeout(refreshTimer);refreshTimer=setTimeout(refresh,projects.some(p=>!['live','failed','needs_connections'].includes(p.status))?2000:12000)}}
+async function createProject(){const status=$('#status'),button=$('#create');status.textContent='Creating project record…';button.disabled=true;try{const d=await api('/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('#name').value,prompt:$('#prompt').value})});status.textContent='Created '+d.project.name+'. Watch its build board below.';$('#name').value='';$('#prompt').value='';await refresh()}catch(e){status.textContent=e.message}finally{button.disabled=false}}
+(async()=>{try{await api('/session',{method:'POST'})}catch(e){$('#status').textContent=e.message}refresh()})();
+</script></body></html>`;
+  return new Response(body, { headers: securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' })) });
+}
+
 async function connectionProviders(env: Env, ownerId: string): Promise<Set<string>> {
   const result = await env.DB.prepare('SELECT provider FROM connections WHERE owner_id = ? AND status = ?').bind(ownerId, 'connected').all<{ provider: string }>();
   return new Set(result.results.map((connection) => connection.provider));
@@ -329,14 +352,19 @@ async function buildStandaloneApp(env: Env, projectId: string): Promise<void> {
 async function projectsWithFeatures(env: Env, ownerId: string) {
   const projects = await env.DB.prepare('SELECT id, name, prompt, github_repository, worker_name, status, created_at, updated_at FROM projects WHERE owner_id = ? ORDER BY updated_at DESC').bind(ownerId).all<Record<string, string | null>>();
   const features = await env.DB.prepare('SELECT project_id, feature, enabled, updated_at FROM project_features WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?) ORDER BY feature').bind(ownerId).all<{ project_id: string; feature: string; enabled: number; updated_at: string }>();
-  return projects.results.map((project) => ({ ...project, features: features.results.filter((feature) => feature.project_id === project.id).map((feature) => ({ ...feature, enabled: Boolean(feature.enabled) })) }));
+  const events = await env.DB.prepare('SELECT project_id, kind, detail, created_at FROM build_events WHERE project_id IN (SELECT id FROM projects WHERE owner_id = ?) ORDER BY created_at DESC').bind(ownerId).all<{ project_id: string; kind: string; detail: string; created_at: string }>();
+  return projects.results.map((project) => ({
+    ...project,
+    features: features.results.filter((feature) => feature.project_id === project.id).map((feature) => ({ ...feature, enabled: Boolean(feature.enabled) })),
+    latest_event: events.results.find((event) => event.project_id === project.id) ?? null,
+  }));
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true, service: 'vela-control-plane' });
-    if (url.pathname === '/' && request.method === 'GET') return dashboardV3();
+    if (url.pathname === '/' && request.method === 'GET') return builderDashboard();
 
     if (url.pathname === '/session' && request.method === 'POST') {
       const existing = await readSession(request, env.SESSION_SECRET);
@@ -441,6 +469,15 @@ export default {
         await env.BUILDS.getByName(id).plan(id, body.prompt);
       }
       return json({ project: await projectForOwner(env, id, sessionId) }, { status: 201 });
+    }
+
+    const eventsMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/events$/);
+    if (eventsMatch && request.method === 'GET') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, eventsMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+      const events = await env.DB.prepare('SELECT kind, detail, created_at FROM build_events WHERE project_id = ? ORDER BY created_at DESC LIMIT 40').bind(project.id).all();
+      return json({ events: events.results });
     }
 
     const featureMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/features\/([a-z0-9_-]{1,64})$/);
