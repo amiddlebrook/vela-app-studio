@@ -123,12 +123,25 @@ async function githubRequest<T>(token: string, path: string, init: RequestInit =
     headers: {
       accept: 'application/vnd.github+json',
       authorization: `Bearer ${token}`,
+      'user-agent': 'Vela-Control-Plane',
       'x-github-api-version': '2022-11-28',
       ...init.headers,
     },
   });
-  const payload = await response.json<unknown>();
-  if (!response.ok) throw new Error(`GitHub request failed (${response.status}): ${typeof payload === 'object' && payload && 'message' in payload ? String(payload.message) : 'unknown error'}`);
+  const body = await response.text();
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body) as unknown;
+  } catch {
+    payload = body;
+  }
+  if (!response.ok) {
+    const detail = typeof payload === 'object' && payload && 'message' in payload
+      ? String(payload.message)
+      : String(payload).slice(0, 300);
+    throw new Error(`GitHub request failed (${response.status}): ${detail}`);
+  }
+  if (typeof payload !== 'object' || !payload) throw new Error('GitHub returned an unexpected response');
   return payload as T;
 }
 
