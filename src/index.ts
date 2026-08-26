@@ -113,17 +113,39 @@ function messageFromError(error: unknown): string {
 }
 
 async function connectedToken(env: Env, ownerId: string, provider: Exclude<Provider, 'google'>): Promise<ConnectionToken> {
-  const connection = await env.DB.prepare('SELECT access_token_ciphertext, external_account_id, token_expires_at FROM connections WHERE owner_id = ? AND provider = ? AND status = ?')
+  const connection = await env.DB.prepare('SELECT access_token_ciphertext, refresh_token_ciphertext, external_account_id, token_expires_at FROM connections WHERE owner_id = ? AND provider = ? AND status = ?')
     .bind(ownerId, provider, 'connected')
-    .first<{ access_token_ciphertext: string | null; external_account_id: string | null; token_expires_at: string | null }>();
+    .first<{ access_token_ciphertext: string | null; refresh_token_ciphertext: string | null; external_account_id: string | null; token_expires_at: string | null }>();
   if (!connection?.access_token_ciphertext) throw new Error(`${provider} connection is missing or expired`);
   if (connection.token_expires_at && Date.parse(connection.token_expires_at) <= Date.now() + 60_000) {
+    if (provider === 'cloudflare' && connection.refresh_token_ciphertext) {
+      return refreshCloudflareToken(env, ownerId, connection);
+    }
     throw new Error(`${provider} connection has expired. Reconnect ${provider} to continue.`);
   }
   return {
     accessToken: JSON.parse(await decrypt(connection.access_token_ciphertext, env.TOKEN_ENCRYPTION_KEY)) as string,
     externalAccountId: connection.external_account_id,
   };
+}
+
+async function refreshCloudflareToken(env: Env, ownerId: string, connection: { refresh_token_ciphertext: string; external_account_id: string | null }): Promise<ConnectionToken> {
+  if (!env.CLOUDFLARE_CLIENT_ID) throw new Error('cloudflare OAuth is not configured');
+  const refreshToken = JSON.parse(await decrypt(connection.refresh_token_ciphertext, env.TOKEN_ENCRYPTION_KEY)) as string;
+  const form = new URLSearchParams({ client_id: env.CLOUDFLARE_CLIENT_ID, grant_type: 'refresh_token', refresh_token: refreshToken });
+  if (env.CLOUDFLARE_CLIENT_SECRET) form.set('client_secret', env.CLOUDFLARE_CLIENT_SECRET);
+  const response = await fetch('https://dash.cloudflare.com/oauth2/token', {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
+    body: form,
+  });
+  const token = await response.json<ProviderToken>();
+  if (!response.ok || !token.access_token) throw new Error(token.error_description ?? token.error ?? 'Cloudflare token refresh failed. Reconnect Cloudflare to continue.');
+  const expiresAt = token.expires_in ? new Date(Date.now() + token.expires_in * 1000).toISOString() : null;
+  await env.DB.prepare('UPDATE connections SET access_token_ciphertext = ?, refresh_token_ciphertext = ?, token_expires_at = ?, updated_at = ? WHERE owner_id = ? AND provider = ?')
+    .bind(await encrypt(token.access_token, env.TOKEN_ENCRYPTION_KEY), token.refresh_token ? await encrypt(token.refresh_token, env.TOKEN_ENCRYPTION_KEY) : connection.refresh_token_ciphertext, expiresAt, new Date().toISOString(), ownerId, 'cloudflare')
+    .run();
+  return { accessToken: token.access_token, externalAccountId: connection.external_account_id };
 }
 
 async function githubRequest<T>(token: string, path: string, init: RequestInit = {}): Promise<T> {
@@ -420,7 +442,7 @@ export default {
       const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', state, code_challenge: await sha256(verifier), code_challenge_method: 'S256' });
       if (startProvider === 'google') params.set('scope', 'openid email profile');
       if (startProvider === 'github') params.set('scope', 'repo workflow read:user');
-      if (startProvider === 'cloudflare') params.set('scope', 'workers-scripts.read workers-scripts.write');
+      if (startProvider === 'cloudflare') params.set('scope', 'workers-scripts.read workers-scripts.write offline_access');
       const endpoint = startProvider === 'google'
         ? 'https://accounts.google.com/o/oauth2/v2/auth'
         : startProvider === 'github'
