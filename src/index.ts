@@ -190,7 +190,7 @@ const appPrompt = ${JSON.stringify(prompt)};
 const escapeHtml = (value) => String(value).replace(/[&<>\"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;' }[character]));
 export default {
   async fetch() {
-    return new Response('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + escapeHtml(appName) + '</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#080a13;color:#f4f5ff;font:16px system-ui}main{max-width:680px;padding:48px}h1{font-size:clamp(40px,8vw,84px);line-height:.9;margin:0 0 24px}p{color:#b7c1e8;line-height:1.65}</style><main><p>Standalone Cloudflare app</p><h1>' + escapeHtml(appName) + '</h1><p>' + escapeHtml(appPrompt) + '</p></main></html>', { headers: { 'content-type': 'text/html; charset=utf-8' } });
+    return new Response('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + escapeHtml(appName) + '</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#080a13;color:#f4f5ff;font:16px system-ui}main{max-width:680px;padding:48px}h1{font-size:clamp(40px,8vw,84px);line-height:.9;margin:0 0 24px}p{color:#b7c1e8;line-height:1.65}</style><main><h1>' + escapeHtml(appName) + '</h1><p>' + escapeHtml(appPrompt) + '</p><p><small>Deployed by Vela Control Plane</small></p></main></html>', { headers: { 'content-type': 'text/html; charset=utf-8' } });
   }
 };
 `;
