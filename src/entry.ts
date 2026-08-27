@@ -4,11 +4,19 @@ export { BuildCoordinator };
 
 type RuntimeEnv = Record<string, unknown> & {
   DB?: D1Database;
+  AI?: Ai;
   SESSION_SECRET?: string;
   TOKEN_ENCRYPTION_KEY?: string | CryptoKey;
+  OPENROUTER_API_KEY?: string;
+  CLOUDFLARE_AI_MODEL?: string;
 };
 
 const encoder = new TextEncoder();
+const nativeFetch = globalThis.fetch.bind(globalThis);
+const OPENROUTER_FALLBACK_SENTINEL = '__vela_cloudflare_ai_fallback__';
+let currentAI: Ai | undefined;
+let currentCloudflareModel = '@cf/meta/llama-3.1-8b-instruct-fast';
+let fetchFallbackInstalled = false;
 
 function base64Url(bytes: Uint8Array): string {
   let binary = '';
@@ -28,9 +36,6 @@ function normalizeD1(db: D1Database): D1Database {
         bind(...values: unknown[]) {
           let normalizedValues = values.map(normalizeBindValue);
 
-          // index.ts currently has two scaffolding persistence calls with three
-          // SQL placeholders but only two bind arguments. Repair that legacy
-          // call shape at the D1 boundary so builds cannot fail on bind arity.
           if (
             query === 'UPDATE projects SET scaffolding_json = ?, updated_at = ? WHERE id = ?' &&
             normalizedValues.length === 2
@@ -50,6 +55,59 @@ function normalizeD1(db: D1Database): D1Database {
     exec: db.exec.bind(db),
     dump: db.dump.bind(db),
   } as D1Database;
+}
+
+function installOpenRouterFallback(): void {
+  if (fetchFallbackInstalled) return;
+  fetchFallbackInstalled = true;
+
+  (globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = async (input, init) => {
+    const url = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+
+    if (url !== 'https://openrouter.ai/api/v1/chat/completions') {
+      return nativeFetch(input, init);
+    }
+
+    const headers = new Headers(init?.headers);
+    const fallbackOnly = headers.get('authorization') === `Bearer ${OPENROUTER_FALLBACK_SENTINEL}`;
+
+    if (!fallbackOnly) {
+      try {
+        const primary = await nativeFetch(input, init);
+        if (primary.ok || !currentAI) return primary;
+        console.warn(JSON.stringify({ event: 'openrouter_primary_failed', status: primary.status, fallback: 'cloudflare-workers-ai' }));
+      } catch (error) {
+        if (!currentAI) throw error;
+        console.warn(JSON.stringify({ event: 'openrouter_primary_error', reason: error instanceof Error ? error.message : String(error), fallback: 'cloudflare-workers-ai' }));
+      }
+    }
+
+    if (!currentAI) {
+      return Response.json({ error: { message: 'Cloudflare Workers AI fallback is not configured' } }, { status: 503 });
+    }
+
+    try {
+      const payload = typeof init?.body === 'string' ? JSON.parse(init.body) as { messages?: unknown[] } : {};
+      const result = await currentAI.run(currentCloudflareModel as Parameters<Ai['run']>[0], {
+        messages: Array.isArray(payload.messages) ? payload.messages : [],
+        max_tokens: 4096,
+      } as never) as { response?: string } | string;
+      const content = typeof result === 'string' ? result : result?.response ?? '';
+      return Response.json({
+        id: `cf-${crypto.randomUUID()}`,
+        object: 'chat.completion',
+        choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(JSON.stringify({ event: 'cloudflare_ai_fallback_failed', reason }));
+      return Response.json({ error: { message: `Cloudflare Workers AI fallback failed: ${reason}` } }, { status: 502 });
+    }
+  };
 }
 
 async function normalizeRuntimeEnv<T extends RuntimeEnv>(env: T): Promise<T> {
@@ -75,9 +133,16 @@ async function normalizeRuntimeEnv<T extends RuntimeEnv>(env: T): Promise<T> {
     );
   }
 
-  // index.ts contains older helper functions that reference `env` as a global.
-  // Keep those helpers working while the control plane is migrated to explicit
-  // dependency injection.
+  currentAI = env.AI;
+  currentCloudflareModel = typeof env.CLOUDFLARE_AI_MODEL === 'string' && env.CLOUDFLARE_AI_MODEL.trim()
+    ? env.CLOUDFLARE_AI_MODEL.trim()
+    : '@cf/meta/llama-3.1-8b-instruct-fast';
+  installOpenRouterFallback();
+
+  if (typeof env.OPENROUTER_API_KEY !== 'string' || !env.OPENROUTER_API_KEY.trim()) {
+    normalized.OPENROUTER_API_KEY = OPENROUTER_FALLBACK_SENTINEL as T['OPENROUTER_API_KEY'];
+  }
+
   (globalThis as typeof globalThis & { env?: T }).env = normalized;
   return normalized;
 }
