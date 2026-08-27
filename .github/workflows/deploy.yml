@@ -14,12 +14,64 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Apply D1 migrations
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: d1 migrations apply vela-control-plane --remote
+
+      - name: Reconcile D1 schema
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          DB="vela-control-plane"
+
+          # Establish the idempotent base schema first. This is safe for both
+          # an existing database and a brand-new one.
+          npx wrangler d1 execute "$DB" --remote --yes --file=migrations/0001_control_plane.sql
+
+          # Wrangler records migration history in this table. The production
+          # database predates the repository migration journal, so reconcile
+          # the real schema first and then align the journal with it.
+          npx wrangler d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL);"
+
+          column_exists() {
+            local table="$1"
+            local column="$2"
+            npx wrangler d1 execute "$DB" --remote --json --command "SELECT COUNT(*) AS present FROM pragma_table_info('$table') WHERE name='$column';" \
+              | grep -Eq '"present"[[:space:]]*:[[:space:]]*1'
+          }
+
+          ensure_column() {
+            local table="$1"
+            local column="$2"
+            local definition="$3"
+            if column_exists "$table" "$column"; then
+              echo "$table.$column already exists"
+            else
+              echo "Adding $table.$column"
+              npx wrangler d1 execute "$DB" --remote --yes --command "ALTER TABLE $table ADD COLUMN $column $definition;"
+            fi
+          }
+
+          # 0002_oauth_connections.sql
+          npx wrangler d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS oauth_states (state_hash TEXT PRIMARY KEY, provider TEXT NOT NULL, session_id TEXT NOT NULL, code_verifier_ciphertext TEXT NOT NULL, redirect_uri TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_oauth_states_expires_at ON oauth_states(expires_at);"
+          ensure_column connections access_token_ciphertext "TEXT"
+          ensure_column connections refresh_token_ciphertext "TEXT"
+          ensure_column connections token_expires_at "TEXT"
+
+          # 0003_build_events.sql
+          npx wrangler d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS build_events (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_build_events_project_created ON build_events(project_id, created_at DESC);"
+
+          # 0004_users.sql
+          npx wrangler d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, google_subject TEXT NOT NULL UNIQUE, email TEXT, name TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+
+          # 0005_scaffolding.sql and 0007_plan_json.sql
+          ensure_column projects scaffolding_json "TEXT"
+          ensure_column projects plan_json "TEXT"
+
+          # Mark the reconciled repository migrations as applied so future
+          # Wrangler migration runs do not attempt destructive duplicates.
+          npx wrangler d1 execute "$DB" --remote --yes --command "INSERT OR IGNORE INTO d1_migrations(name) VALUES ('0001_control_plane.sql'), ('0002_oauth_connections.sql'), ('0003_build_events.sql'), ('0004_users.sql'), ('0005_scaffolding.sql'), ('0007_plan_json.sql');"
+
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:
