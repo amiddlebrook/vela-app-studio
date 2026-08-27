@@ -48,13 +48,12 @@ jobs:
           fi
 
           if grep -Fxq 'OPENROUTER_API_KEY' <<<"$SECRET_NAMES"; then
-            echo 'OPENROUTER_API_KEY already configured.'
+            echo 'OPENROUTER_API_KEY already configured on Worker.'
           elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
             PAYLOAD="$(jq -c --arg value "$OPENROUTER_API_KEY" '. + {OPENROUTER_API_KEY:$value}' <<<"$PAYLOAD")"
-            echo 'OPENROUTER_API_KEY missing on Worker; installing it from GitHub Actions secret.'
+            echo 'Installing OPENROUTER_API_KEY from GitHub Actions secret.'
           else
-            echo '::error::OPENROUTER_API_KEY is missing from the Worker and from GitHub Actions secrets. Vela cannot generate AI plans without it.'
-            exit 1
+            echo 'OPENROUTER_API_KEY is not configured; Cloudflare Workers AI will be used as the automatic fallback/primary provider.'
           fi
 
           if [ "$PAYLOAD" != '{}' ]; then
@@ -64,9 +63,7 @@ jobs:
           fi
 
           echo 'Configured Worker secret names:'
-          SECRET_NAMES="$($WRANGLER secret list --format json | jq -r '.[].name')"
-          printf '%s\n' "$SECRET_NAMES" | sort
-          grep -Fxq 'OPENROUTER_API_KEY' <<<"$SECRET_NAMES"
+          $WRANGLER secret list --format json | jq -r '.[].name' | sort
 
       - name: Reconcile D1 schema
         shell: bash
