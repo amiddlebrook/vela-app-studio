@@ -90,6 +90,19 @@ async function readSession(request: Request, secret: string): Promise<string | n
   return id && signature && (await hmac(id, secret)) === signature ? id : null;
 }
 
+function unsignedAnonymousSessionId(request: Request): string | null {
+  const value = request.headers.get('cookie')?.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`))?.[1];
+  const id = value?.split('.')[0] ?? null;
+  return id && /^[A-Za-z0-9_-]{40,64}$/.test(id) ? id : null;
+}
+
+async function ownerHasState(env: Env, ownerId: string): Promise<boolean> {
+  const row = await env.DB.prepare('SELECT 1 AS present FROM connections WHERE owner_id = ? UNION ALL SELECT 1 AS present FROM projects WHERE owner_id = ? LIMIT 1')
+    .bind(ownerId, ownerId)
+    .first<{ present: number }>();
+  return row?.present === 1;
+}
+
 async function encrypt(value: unknown, key: CryptoKey): Promise<string> {
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
@@ -610,10 +623,56 @@ async function resumeBuild(id){$('#status').textContent='Resuming from last good
 }
 
 async function connectionProviders(env: Env, ownerId: string): Promise<Set<string>> {
+  await refreshCloudflareConnectionIfNeeded(env, ownerId);
   const result = await env.DB.prepare('SELECT provider FROM connections WHERE owner_id = ? AND status = ? AND (token_expires_at IS NULL OR token_expires_at > ?)')
     .bind(ownerId, 'connected', new Date(Date.now() + 60_000).toISOString())
     .all<{ provider: string }>();
   return new Set(result.results.map((connection) => connection.provider));
+}
+
+async function mergeOwnerState(env: Env, currentOwnerId: string, targetOwnerId: string): Promise<void> {
+  if (currentOwnerId === targetOwnerId) return;
+  const now = new Date().toISOString();
+  const currentConnections = await env.DB.prepare('SELECT id, provider FROM connections WHERE owner_id = ?')
+    .bind(currentOwnerId)
+    .all<{ id: string; provider: string }>();
+  for (const connection of currentConnections.results) {
+    const target = await env.DB.prepare('SELECT id FROM connections WHERE owner_id = ? AND provider = ?')
+      .bind(targetOwnerId, connection.provider)
+      .first<{ id: string }>();
+    if (target) {
+      await env.DB.prepare('DELETE FROM connections WHERE id = ?').bind(connection.id).run();
+    } else {
+      await env.DB.prepare('UPDATE connections SET owner_id = ?, updated_at = ? WHERE id = ?')
+        .bind(targetOwnerId, now, connection.id)
+        .run();
+    }
+  }
+  await env.DB.prepare('UPDATE projects SET owner_id = ?, updated_at = ? WHERE owner_id = ?')
+    .bind(targetOwnerId, now, currentOwnerId)
+    .run();
+}
+
+async function recoverOwnerFromProvider(env: Env, currentOwnerId: string, provider: Exclude<Provider, 'google'>, externalAccountId: string): Promise<string> {
+  const existing = await env.DB.prepare('SELECT owner_id FROM connections WHERE provider = ? AND external_account_id = ? ORDER BY updated_at DESC LIMIT 1')
+    .bind(provider, externalAccountId)
+    .first<{ owner_id: string }>();
+  if (!existing?.owner_id || existing.owner_id === currentOwnerId) return currentOwnerId;
+  await mergeOwnerState(env, currentOwnerId, existing.owner_id);
+  return existing.owner_id;
+}
+
+async function refreshCloudflareConnectionIfNeeded(env: Env, ownerId: string): Promise<void> {
+  const connection = await env.DB.prepare('SELECT refresh_token_ciphertext, token_expires_at FROM connections WHERE owner_id = ? AND provider = ? AND status = ?')
+    .bind(ownerId, 'cloudflare', 'connected')
+    .first<{ refresh_token_ciphertext: string | null; token_expires_at: string | null }>();
+  if (!connection?.refresh_token_ciphertext || !connection.token_expires_at) return;
+  if (Date.parse(connection.token_expires_at) > Date.now() + 60_000) return;
+  try {
+    await connectedToken(env, ownerId, 'cloudflare');
+  } catch (error) {
+    console.warn('Cloudflare token refresh during connection check failed:', messageFromError(error));
+  }
 }
 
 async function completeGoogleLogin(env: Env, anonymousOwnerId: string, identity: ProviderIdentity): Promise<{ ownerId: string; cookie: string }> {
@@ -775,6 +834,11 @@ export default {
     if (url.pathname === '/session' && request.method === 'POST') {
       const existing = await readSession(request, env.SESSION_SECRET);
       if (existing) return json({ ready: true });
+      const staleOwnerId = unsignedAnonymousSessionId(request);
+      if (staleOwnerId && await ownerHasState(env, staleOwnerId)) {
+        const recovered = await issueSessionForId(staleOwnerId, env.SESSION_SECRET);
+        return json({ ready: true, recovered: true }, { headers: { 'set-cookie': recovered.cookie } });
+      }
       const session = await issueSession(env.SESSION_SECRET);
       return json({ ready: true }, { headers: { 'set-cookie': session.cookie } });
     }
@@ -826,12 +890,20 @@ export default {
           ? { id: env.CLOUDFLARE_ACCOUNT_ID }
           : await providerIdentity(callbackProvider, token.access_token!);
         const login = callbackProvider === 'google' ? await completeGoogleLogin(env, stored.session_id, identity) : null;
-        const ownerId = login?.ownerId ?? stored.session_id;
-        const now = new Date().toISOString();
+      let ownerId = login?.ownerId ?? stored.session_id;
+      let sessionCookie = login?.cookie;
+      if (!login && (callbackProvider === 'github' || callbackProvider === 'cloudflare')) {
+        const recoveredOwnerId = await recoverOwnerFromProvider(env, stored.session_id, callbackProvider, identity.id);
+        if (recoveredOwnerId !== stored.session_id) {
+          ownerId = recoveredOwnerId;
+          sessionCookie = (await issueSessionForId(ownerId, env.SESSION_SECRET)).cookie;
+        }
+      }
+      const now = new Date().toISOString();
         const expiresAt = token.expires_in ? new Date(Date.now() + token.expires_in * 1000).toISOString() : null;
         await env.DB.prepare(`INSERT INTO connections (id, owner_id, provider, external_account_id, access_token_ciphertext, refresh_token_ciphertext, token_expires_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'connected', ?, ?) ON CONFLICT(owner_id, provider) DO UPDATE SET external_account_id = excluded.external_account_id, access_token_ciphertext = excluded.access_token_ciphertext, refresh_token_ciphertext = excluded.refresh_token_ciphertext, token_expires_at = excluded.token_expires_at, status = 'connected', updated_at = excluded.updated_at`)
           .bind(crypto.randomUUID(), ownerId, callbackProvider, identity.id, await encrypt(token.access_token, env.TOKEN_ENCRYPTION_KEY), token.refresh_token ? await encrypt(token.refresh_token, env.TOKEN_ENCRYPTION_KEY) : null, expiresAt, now, now).run();
-        return successPage(callbackProvider, login?.cookie);
+        return successPage(callbackProvider, sessionCookie);
       } catch (error) {
         const reason = messageFromError(error);
         console.error(JSON.stringify({ event: 'oauth_callback_failed', provider: callbackProvider, message: reason }));
@@ -842,6 +914,7 @@ export default {
     const sessionId = await readSession(request, env.SESSION_SECRET);
     if (url.pathname === '/connections' && request.method === 'GET') {
       if (!sessionId) return json({ error: 'Connect an account first.' }, { status: 401 });
+      await refreshCloudflareConnectionIfNeeded(env, sessionId);
       const connections = await env.DB.prepare('SELECT provider, external_account_id, status, token_expires_at, updated_at FROM connections WHERE owner_id = ? ORDER BY provider').bind(sessionId).all();
       return json({ connections: connections.results });
     }
