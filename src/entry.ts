@@ -16,27 +16,28 @@ function base64Url(bytes: Uint8Array): string {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
+function normalizeBindValue(value: unknown): unknown {
+  return value === undefined ? null : value;
+}
+
 function normalizeD1(db: D1Database): D1Database {
-  return new Proxy(db, {
-    get(target, property, receiver) {
-      if (property === 'prepare') {
-        return (query: string) => {
-          const statement = target.prepare(query);
-          return new Proxy(statement, {
-            get(statementTarget, statementProperty, statementReceiver) {
-              if (statementProperty === 'bind') {
-                return (...values: unknown[]) => statementTarget.bind(...values.map((value) => value === undefined ? null : value));
-              }
-              const value = Reflect.get(statementTarget, statementProperty, statementReceiver);
-              return typeof value === 'function' ? value.bind(statementTarget) : value;
-            },
-          });
-        };
-      }
-      const value = Reflect.get(target, property, receiver);
-      return typeof value === 'function' ? value.bind(target) : value;
+  return {
+    prepare(query: string) {
+      const statement = db.prepare(query);
+      return {
+        bind(...values: unknown[]) {
+          return statement.bind(...values.map(normalizeBindValue));
+        },
+        first: statement.first.bind(statement),
+        run: statement.run.bind(statement),
+        all: statement.all.bind(statement),
+        raw: statement.raw.bind(statement),
+      } as D1PreparedStatement;
     },
-  }) as D1Database;
+    batch: db.batch.bind(db),
+    exec: db.exec.bind(db),
+    dump: db.dump.bind(db),
+  } as D1Database;
 }
 
 async function normalizeRuntimeEnv<T extends RuntimeEnv>(env: T): Promise<T> {
