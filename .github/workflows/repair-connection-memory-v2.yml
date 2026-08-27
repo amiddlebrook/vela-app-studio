@@ -1,0 +1,197 @@
+name: Repair connection memory v2
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch persistent account recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('src/index.ts')
+          s = p.read_text()
+          original = s
+
+          def replace_once(pattern, replacement, label, flags=0):
+              global s
+              s2, n = re.subn(pattern, replacement, s, count=1, flags=flags)
+              if n != 1:
+                  raise SystemExit(f'{label}: expected one match, found {n}')
+              s = s2
+
+          # Recover a stale anonymous session if SESSION_SECRET rotated but D1 still owns state.
+          if 'function unsignedAnonymousSessionId' not in s:
+              anchor = 'async function encrypt(value: unknown, key: CryptoKey): Promise<string> {'
+              if anchor not in s:
+                  raise SystemExit('session helper anchor missing')
+              helpers = r'''function unsignedAnonymousSessionId(request: Request): string | null {
+            const value = request.headers.get('cookie')?.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`))?.[1];
+            const id = value?.split('.')[0] ?? null;
+            return id && /^[A-Za-z0-9_-]{40,64}$/.test(id) ? id : null;
+          }
+
+          async function ownerHasState(env: Env, ownerId: string): Promise<boolean> {
+            const row = await env.DB.prepare('SELECT 1 AS present FROM connections WHERE owner_id = ? UNION ALL SELECT 1 AS present FROM projects WHERE owner_id = ? LIMIT 1')
+              .bind(ownerId, ownerId)
+              .first<{ present: number }>();
+            return row?.present === 1;
+          }
+
+          '''
+              s = s.replace(anchor, helpers + anchor, 1)
+
+          if 'const staleOwnerId = unsignedAnonymousSessionId(request);' not in s:
+              replace_once(
+                  r"(if \(url\.pathname === '/session' && request\.method === 'POST'\) \{\s+const existing = await readSession\(request, env\.SESSION_SECRET\);\s+if \(existing\) return json\(\{ ready: true \}\);)(\s+const session = await issueSession\(env\.SESSION_SECRET\);)",
+                  r"\1\n      const staleOwnerId = unsignedAnonymousSessionId(request);\n      if (staleOwnerId && await ownerHasState(env, staleOwnerId)) {\n        const recovered = await issueSessionForId(staleOwnerId, env.SESSION_SECRET);\n        return json({ ready: true, recovered: true }, { headers: { 'set-cookie': recovered.cookie } });\n      }\2",
+                  'session recovery block',
+                  re.S,
+              )
+
+          # Stable account identity recovery and owner merge.
+          if 'async function recoverOwnerFromProvider' not in s:
+              anchor = 'async function completeGoogleLogin(env: Env, anonymousOwnerId: string, identity: ProviderIdentity): Promise<{ ownerId: string; cookie: string }> {'
+              if anchor not in s:
+                  raise SystemExit('owner helper anchor missing')
+              helpers = '''async function mergeOwnerState(env: Env, currentOwnerId: string, targetOwnerId: string): Promise<void> {
+            if (currentOwnerId === targetOwnerId) return;
+            const now = new Date().toISOString();
+            const currentConnections = await env.DB.prepare('SELECT id, provider FROM connections WHERE owner_id = ?')
+              .bind(currentOwnerId)
+              .all<{ id: string; provider: string }>();
+            for (const connection of currentConnections.results) {
+              const target = await env.DB.prepare('SELECT id FROM connections WHERE owner_id = ? AND provider = ?')
+                .bind(targetOwnerId, connection.provider)
+                .first<{ id: string }>();
+              if (target) {
+                await env.DB.prepare('DELETE FROM connections WHERE id = ?').bind(connection.id).run();
+              } else {
+                await env.DB.prepare('UPDATE connections SET owner_id = ?, updated_at = ? WHERE id = ?')
+                  .bind(targetOwnerId, now, connection.id)
+                  .run();
+              }
+            }
+            await env.DB.prepare('UPDATE projects SET owner_id = ?, updated_at = ? WHERE owner_id = ?')
+              .bind(targetOwnerId, now, currentOwnerId)
+              .run();
+          }
+
+          async function recoverOwnerFromProvider(env: Env, currentOwnerId: string, provider: Exclude<Provider, 'google'>, externalAccountId: string): Promise<string> {
+            const existing = await env.DB.prepare('SELECT owner_id FROM connections WHERE provider = ? AND external_account_id = ? ORDER BY updated_at DESC LIMIT 1')
+              .bind(provider, externalAccountId)
+              .first<{ owner_id: string }>();
+            if (!existing?.owner_id || existing.owner_id === currentOwnerId) return currentOwnerId;
+            await mergeOwnerState(env, currentOwnerId, existing.owner_id);
+            return existing.owner_id;
+          }
+
+          async function refreshCloudflareConnectionIfNeeded(env: Env, ownerId: string): Promise<void> {
+            const connection = await env.DB.prepare('SELECT refresh_token_ciphertext, token_expires_at FROM connections WHERE owner_id = ? AND provider = ? AND status = ?')
+              .bind(ownerId, 'cloudflare', 'connected')
+              .first<{ refresh_token_ciphertext: string | null; token_expires_at: string | null }>();
+            if (!connection?.refresh_token_ciphertext || !connection.token_expires_at) return;
+            if (Date.parse(connection.token_expires_at) > Date.now() + 60_000) return;
+            try {
+              await connectedToken(env, ownerId, 'cloudflare');
+            } catch (error) {
+              console.warn('Cloudflare token refresh during connection check failed:', messageFromError(error));
+            }
+          }
+
+          '''
+              s = s.replace(anchor, helpers + anchor, 1)
+
+          if 'let sessionCookie = login?.cookie;' not in s:
+              replace_once(
+                  r"const login = callbackProvider === 'google' \? await completeGoogleLogin\(env, stored\.session_id, identity\) : null;\s+const ownerId = login\?\.ownerId \?\? stored\.session_id;\s+const now = new Date\(\)\.toISOString\(\);",
+                  """const login = callbackProvider === 'google' ? await completeGoogleLogin(env, stored.session_id, identity) : null;
+                let ownerId = login?.ownerId ?? stored.session_id;
+                let sessionCookie = login?.cookie;
+                if (!login && (callbackProvider === 'github' || callbackProvider === 'cloudflare')) {
+                  const recoveredOwnerId = await recoverOwnerFromProvider(env, stored.session_id, callbackProvider, identity.id);
+                  if (recoveredOwnerId !== stored.session_id) {
+                    ownerId = recoveredOwnerId;
+                    sessionCookie = (await issueSessionForId(ownerId, env.SESSION_SECRET)).cookie;
+                  }
+                }
+                const now = new Date().toISOString();""",
+                  'oauth owner recovery',
+                  re.S,
+              )
+
+          if 'return successPage(callbackProvider, sessionCookie);' not in s:
+              replace_once(
+                  r"return successPage\(callbackProvider, login\?\.cookie\);",
+                  'return successPage(callbackProvider, sessionCookie);',
+                  'oauth recovered cookie return',
+              )
+
+          # Refresh remembered Cloudflare connection before declaring it expired.
+          if 'await refreshCloudflareConnectionIfNeeded(env, ownerId);' not in s:
+              replace_once(
+                  r"(async function connectionProviders\(env: Env, ownerId: string\): Promise<Set<string>> \{)",
+                  r"\1\n  await refreshCloudflareConnectionIfNeeded(env, ownerId);",
+                  'connectionProviders refresh',
+              )
+
+          if 'await refreshCloudflareConnectionIfNeeded(env, sessionId);' not in s:
+              replace_once(
+                  r"(if \(url\.pathname === '/connections' && request\.method === 'GET'\) \{\s+if \(!sessionId\) return json\(\{ error: 'Connect an account first\.' \}, \{ status: 401 \}\);)",
+                  r"\1\n      await refreshCloudflareConnectionIfNeeded(env, sessionId);",
+                  'connections endpoint refresh',
+                  re.S,
+              )
+
+          if s == original:
+              print('Already repaired; no source changes required.')
+          else:
+              p.write_text(s)
+          PY
+
+          if git diff --quiet -- src/index.ts; then
+            echo 'No source patch required.'
+            exit 0
+          fi
+
+          git diff --check
+          git diff -- src/index.ts
+
+          python - <<'PY'
+          from pathlib import Path
+          s = Path('src/index.ts').read_text()
+          required = [
+            'function unsignedAnonymousSessionId',
+            'async function ownerHasState',
+            'async function mergeOwnerState',
+            'async function recoverOwnerFromProvider',
+            'async function refreshCloudflareConnectionIfNeeded',
+            'let sessionCookie = login?.cookie;',
+            'return successPage(callbackProvider, sessionCookie);',
+            'await refreshCloudflareConnectionIfNeeded(env, ownerId);',
+            'await refreshCloudflareConnectionIfNeeded(env, sessionId);',
+          ]
+          missing = [x for x in required if x not in s]
+          if missing:
+              raise SystemExit('Repair validation failed: ' + ', '.join(missing))
+          print('Connection-memory source validation passed.')
+          PY
+
+          git config user.name 'vela-repair-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src/index.ts
+          git commit -m 'Persist and recover connected account state'
+          git push origin HEAD:main
