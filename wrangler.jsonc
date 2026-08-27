@@ -8,10 +8,14 @@
   "vars": {
     "APP_ORIGIN": "https://vela-control-plane.averymiddlebrook2014.workers.dev",
     "CLOUDFLARE_ACCOUNT_ID": "07f1b17fd676c14af148ff1d818383a9",
-    "OPENROUTER_MODEL": "z-ai/glm-5.2:free"
+    "OPENROUTER_MODEL": "z-ai/glm-5.2:free",
+    "CLOUDFLARE_AI_MODEL": "@cf/meta/llama-3.1-8b-instruct-fast"
   },
   "secrets": {
-    "required": ["SESSION_SECRET", "TOKEN_ENCRYPTION_KEY", "OPENROUTER_API_KEY"]
+    "required": ["SESSION_SECRET", "TOKEN_ENCRYPTION_KEY"]
+  },
+  "ai": {
+    "binding": "AI"
   },
   "durable_objects": {
     "bindings": [{ "name": "BUILDS", "class_name": "BuildCoordinator" }]
