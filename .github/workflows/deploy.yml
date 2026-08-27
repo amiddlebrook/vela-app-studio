@@ -15,6 +15,42 @@ jobs:
           cache: npm
       - run: npm ci
 
+      - name: Ensure runtime secrets
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          WRANGLER="npx --yes wrangler@4.126.0"
+          SECRET_NAMES="$($WRANGLER secret list --format json | jq -r '.[].name')"
+          PAYLOAD='{}'
+
+          if ! grep -Fxq 'SESSION_SECRET' <<<"$SECRET_NAMES"; then
+            VALUE="$(openssl rand -base64 48 | tr -d '\n=' | tr '+/' '-_')"
+            PAYLOAD="$(jq -c --arg value "$VALUE" '. + {SESSION_SECRET:$value}' <<<"$PAYLOAD")"
+            echo 'SESSION_SECRET missing; creating it.'
+          else
+            echo 'SESSION_SECRET already configured.'
+          fi
+
+          if ! grep -Fxq 'TOKEN_ENCRYPTION_KEY' <<<"$SECRET_NAMES"; then
+            VALUE="$(openssl rand -base64 48 | tr -d '\n=' | tr '+/' '-_')"
+            PAYLOAD="$(jq -c --arg value "$VALUE" '. + {TOKEN_ENCRYPTION_KEY:$value}' <<<"$PAYLOAD")"
+            echo 'TOKEN_ENCRYPTION_KEY missing; creating it.'
+          else
+            echo 'TOKEN_ENCRYPTION_KEY already configured.'
+          fi
+
+          if [ "$PAYLOAD" != '{}' ]; then
+            printf '%s' "$PAYLOAD" > /tmp/vela-runtime-secrets.json
+            $WRANGLER secret bulk /tmp/vela-runtime-secrets.json
+            rm -f /tmp/vela-runtime-secrets.json
+          fi
+
+          echo 'Configured Worker secret names:'
+          $WRANGLER secret list --format json | jq -r '.[].name' | sort
+
       - name: Reconcile D1 schema
         shell: bash
         env:
@@ -22,21 +58,16 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
+          WRANGLER="npx --yes wrangler@4.126.0"
           DB="vela-control-plane"
 
-          # Establish the idempotent base schema first. This is safe for both
-          # an existing database and a brand-new one.
-          npx wrangler d1 execute "$DB" --remote --yes --file=migrations/0001_control_plane.sql
-
-          # Wrangler records migration history in this table. The production
-          # database predates the repository migration journal, so reconcile
-          # the real schema first and then align the journal with it.
-          npx wrangler d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL);"
+          $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0001_control_plane.sql
+          $WRANGLER d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL);"
 
           column_exists() {
             local table="$1"
             local column="$2"
-            npx wrangler d1 execute "$DB" --remote --json --command "SELECT COUNT(*) AS present FROM pragma_table_info('$table') WHERE name='$column';" \
+            $WRANGLER d1 execute "$DB" --remote --json --command "SELECT COUNT(*) AS present FROM pragma_table_info('$table') WHERE name='$column';" \
               | grep -Eq '"present"[[:space:]]*:[[:space:]]*1'
           }
 
@@ -48,33 +79,70 @@ jobs:
               echo "$table.$column already exists"
             else
               echo "Adding $table.$column"
-              npx wrangler d1 execute "$DB" --remote --yes --command "ALTER TABLE $table ADD COLUMN $column $definition;"
+              $WRANGLER d1 execute "$DB" --remote --yes --command "ALTER TABLE $table ADD COLUMN $column $definition;"
             fi
           }
 
-          # 0002_oauth_connections.sql
-          npx wrangler d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS oauth_states (state_hash TEXT PRIMARY KEY, provider TEXT NOT NULL, session_id TEXT NOT NULL, code_verifier_ciphertext TEXT NOT NULL, redirect_uri TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_oauth_states_expires_at ON oauth_states(expires_at);"
+          $WRANGLER d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS oauth_states (state_hash TEXT PRIMARY KEY, provider TEXT NOT NULL, session_id TEXT NOT NULL, code_verifier_ciphertext TEXT NOT NULL, redirect_uri TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_oauth_states_expires_at ON oauth_states(expires_at);"
           ensure_column connections access_token_ciphertext "TEXT"
           ensure_column connections refresh_token_ciphertext "TEXT"
           ensure_column connections token_expires_at "TEXT"
 
-          # 0003_build_events.sql
-          npx wrangler d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS build_events (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_build_events_project_created ON build_events(project_id, created_at DESC);"
+          $WRANGLER d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS build_events (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL, stage TEXT, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_build_events_project_created ON build_events(project_id, created_at DESC);"
+          ensure_column build_events stage "TEXT"
 
-          # 0004_users.sql
-          npx wrangler d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, google_subject TEXT NOT NULL UNIQUE, email TEXT, name TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
-
-          # 0005_scaffolding.sql and 0007_plan_json.sql
+          $WRANGLER d1 execute "$DB" --remote --yes --command "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, google_subject TEXT NOT NULL UNIQUE, email TEXT, name TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
           ensure_column projects scaffolding_json "TEXT"
           ensure_column projects plan_json "TEXT"
 
-          # Mark the reconciled repository migrations as applied so future
-          # Wrangler migration runs do not attempt destructive duplicates.
-          npx wrangler d1 execute "$DB" --remote --yes --command "INSERT OR IGNORE INTO d1_migrations(name) VALUES ('0001_control_plane.sql'), ('0002_oauth_connections.sql'), ('0003_build_events.sql'), ('0004_users.sql'), ('0005_scaffolding.sql'), ('0007_plan_json.sql');"
+          $WRANGLER d1 execute "$DB" --remote --yes --command "INSERT OR IGNORE INTO d1_migrations(name) VALUES ('0001_control_plane.sql'), ('0002_oauth_connections.sql'), ('0003_build_events.sql'), ('0004_users.sql'), ('0005_scaffolding.sql'), ('0007_plan_json.sql'), ('0008_build_event_stage.sql');"
 
       - name: Deploy Worker
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.126.0"
           command: deploy
+
+      - name: Runtime smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://vela-control-plane.averymiddlebrook2014.workers.dev'
+
+          request() {
+            local label="$1"
+            local output="$2"
+            shift 2
+            local status
+            status="$(curl -sS -o "$output" -w '%{http_code}' "$@")"
+            if [[ "$status" != 2* ]]; then
+              echo "$label failed with HTTP $status"
+              cat "$output"
+              exit 1
+            fi
+            node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$output"
+          }
+
+          for attempt in {1..10}; do
+            status="$(curl -sS -o /tmp/vela-health.json -w '%{http_code}' "$BASE/health" || true)"
+            if [ "$status" = '200' ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "${status:-}" != '200' ]; then
+            echo "health check failed with HTTP ${status:-none}"
+            cat /tmp/vela-health.json 2>/dev/null || true
+            exit 1
+          fi
+          node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-health.json','utf8'));if(x.ok!==true)process.exit(1)"
+
+          request session /tmp/vela-session.json -c /tmp/vela.cookies -X POST "$BASE/session"
+          request connections /tmp/vela-connections.json -b /tmp/vela.cookies "$BASE/connections"
+          request projects /tmp/vela-projects.json -b /tmp/vela.cookies "$BASE/projects"
+
+          node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-connections.json','utf8'));if(!Array.isArray(x.connections))throw new Error('connections payload invalid')"
+          node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-projects.json','utf8'));if(!Array.isArray(x.projects))throw new Error('projects payload invalid')"
+          echo 'Runtime smoke test passed.'
