@@ -26,7 +26,19 @@ function normalizeD1(db: D1Database): D1Database {
       const statement = db.prepare(query);
       return {
         bind(...values: unknown[]) {
-          return statement.bind(...values.map(normalizeBindValue));
+          let normalizedValues = values.map(normalizeBindValue);
+
+          // index.ts currently has two scaffolding persistence calls with three
+          // SQL placeholders but only two bind arguments. Repair that legacy
+          // call shape at the D1 boundary so builds cannot fail on bind arity.
+          if (
+            query === 'UPDATE projects SET scaffolding_json = ?, updated_at = ? WHERE id = ?' &&
+            normalizedValues.length === 2
+          ) {
+            normalizedValues = [normalizedValues[0], new Date().toISOString(), normalizedValues[1]];
+          }
+
+          return statement.bind(...normalizedValues);
         },
         first: statement.first.bind(statement),
         run: statement.run.bind(statement),
