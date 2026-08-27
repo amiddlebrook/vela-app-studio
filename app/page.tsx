@@ -26,10 +26,26 @@ type AuditLog = {
   created_at: string;
 };
 
+type WorkspaceSettings = {
+  active_provider: string;
+  openrouter_key?: string;
+  openrouter_model: string;
+  openai_key?: string;
+  openai_model: string;
+  gemini_key?: string;
+  gemini_model: string;
+  anthropic_key?: string;
+  anthropic_model: string;
+  cf_ai_model: string;
+  custom_endpoint?: string;
+  custom_key?: string;
+  custom_model?: string;
+};
+
 export default function Home() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
-  const [view, setView] = useState<'home' | 'apps' | 'activity' | 'audit'>('home');
+  const [view, setView] = useState<'home' | 'apps' | 'activity' | 'audit' | 'toolbox'>('home');
   const [prompt, setPrompt] = useState('');
   const [appName, setAppName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -39,6 +55,18 @@ export default function Home() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [selectedCode, setSelectedCode] = useState<{ frontend?: string; backend?: string; database?: string } | null>(null);
   const [codeModalOpen, setCodeModalOpen] = useState(false);
+
+  // Settings State
+  const [settings, setSettings] = useState<WorkspaceSettings>({
+    active_provider: 'auto',
+    openrouter_model: 'anthropic/claude-3.5-sonnet',
+    openai_model: 'gpt-4o',
+    gemini_model: 'gemini-2.0-flash',
+    anthropic_model: 'claude-3-5-sonnet-20241022',
+    cf_ai_model: '@cf/meta/llama-3.3-70b-instruct',
+  });
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [testingAI, setTestingAI] = useState(false);
 
   const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
     const res = await fetch(path, options);
@@ -69,6 +97,42 @@ export default function Home() {
       setAuditLogs(auditRes.audit_logs || []);
     } catch (e) {
       console.warn('Sync warning:', e);
+    }
+  };
+
+  const loadSettings = async () => {
+    try {
+      const data = await api<WorkspaceSettings>('/settings');
+      setSettings(data);
+    } catch (e) {
+      console.warn('Settings load warning:', e);
+    }
+  };
+
+  const saveSettings = async () => {
+    try {
+      setNote('Saving AI Toolbox settings...');
+      await api('/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      });
+      setNote('AI Toolbox settings saved successfully.');
+    } catch (err: unknown) {
+      setNote(err instanceof Error ? err.message : 'Save settings failed');
+    }
+  };
+
+  const handleTestAI = async () => {
+    setTestingAI(true);
+    setTestResult('Testing active AI model generation...');
+    try {
+      const res = await api<{ ok: boolean; latency_ms: number; response: string }>('/settings/test-llm', { method: 'POST' });
+      setTestResult(`✓ Operational (${res.latency_ms}ms): "${res.response}"`);
+    } catch (err: unknown) {
+      setTestResult(`✕ Test failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setTestingAI(false);
     }
   };
 
@@ -160,6 +224,18 @@ export default function Home() {
     }
   };
 
+  const handleDelete = async (id: string, name: string) => {
+    if (!window.confirm(`Are you sure you want to delete build "${name}"? This action cannot be undone.`)) return;
+    try {
+      setNote(`Deleting build "${name}"...`);
+      await api(`/projects/${id}`, { method: 'DELETE' });
+      setNote(`Build "${name}" deleted.`);
+      await syncWorkspace();
+    } catch (err: unknown) {
+      setNote(err instanceof Error ? err.message : 'Delete failed');
+    }
+  };
+
   const viewCode = async (id: string) => {
     try {
       const data = await api<{ frontend?: string; backend?: string; database?: string }>(`/projects/${id}/code`);
@@ -188,6 +264,7 @@ export default function Home() {
         <nav>
           <Nav label="⌂" text="Overview" active={view === 'home'} onClick={() => setView('home')} />
           <Nav label="◫" text={`Apps (${projects.length})`} active={view === 'apps'} onClick={() => setView('apps')} />
+          <Nav label="⚡" text="AI Toolbox" active={view === 'toolbox'} onClick={() => { setView('toolbox'); loadSettings(); }} />
           <Nav label="⌁" text="Activity" active={view === 'activity'} onClick={() => setView('activity')} />
           <Nav label="🛡" text="Audit & Compliance" active={view === 'audit'} onClick={() => setView('audit')} />
         </nav>
@@ -212,6 +289,8 @@ export default function Home() {
                 ? 'ENTERPRISE APP STUDIO'
                 : view === 'apps'
                 ? 'APPLICATION PORTFOLIO'
+                : view === 'toolbox'
+                ? 'AI PROVIDER TOOLBOX'
                 : view === 'audit'
                 ? 'SECURITY & AUDIT'
                 : 'BUILD PIPELINE'}
@@ -221,6 +300,8 @@ export default function Home() {
                 ? 'What will you architect today?'
                 : view === 'apps'
                 ? 'Enterprise Edge Portfolio'
+                : view === 'toolbox'
+                ? 'Manageable AI Providers & Models'
                 : view === 'audit'
                 ? 'Compliance & Audit Log'
                 : 'Real-Time Edge Telemetry'}
@@ -294,7 +375,7 @@ export default function Home() {
 
             <Section title="Active Applications" action={() => setView('apps')} />
             <div className="cards">
-              {projects.slice(0, 3).map((p) => (
+              {projects.slice(0, 6).map((p) => (
                 <article className="card" key={p.id}>
                   <div className="cardtop">
                     <span className="mark blue">{p.name[0]}</span>
@@ -326,7 +407,12 @@ export default function Home() {
                   )}
                   <footer>
                     <span>{usageCost}<small>monthly</small></span>
-                    <span>Cloudflare <b>✓</b></span>
+                    <button
+                      onClick={() => handleDelete(p.id, p.name)}
+                      style={{ background: 'none', border: 0, color: '#f87171', fontSize: '11px', cursor: 'pointer', fontWeight: 600 }}
+                    >
+                      Delete 🗑
+                    </button>
                   </footer>
                 </article>
               ))}
@@ -337,6 +423,129 @@ export default function Home() {
               )}
             </div>
           </>
+        )}
+
+        {/* AI Toolbox View */}
+        {view === 'toolbox' && (
+          <section className="portfolio" style={{ maxWidth: '800px' }}>
+            <div style={{ background: '#fff', border: '1px solid #e7e8eb', borderRadius: '16px', padding: '24px', width: '100%' }}>
+              <h2 style={{ fontSize: '18px', fontWeight: 800, marginBottom: '6px' }}>AI Provider &amp; Model Toolbox</h2>
+              <p style={{ fontSize: '13px', color: '#788091', marginBottom: '20px' }}>
+                Configure and test multi-provider LLMs. Easily toggle between Cloudflare Workers AI, OpenRouter, OpenAI, and custom endpoints.
+              </p>
+
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, marginBottom: '4px' }}>PRIMARY AI ROUTING</label>
+                <select
+                  value={settings.active_provider}
+                  onChange={(e) => setSettings({ ...settings, active_provider: e.target.value })}
+                  style={{ width: '100%', padding: '10px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
+                >
+                  <option value="auto">Auto (Failover: Custom → OpenRouter → Cloudflare AI → OpenAI → Gemini)</option>
+                  <option value="cloudflare">Cloudflare Workers AI (Edge Native)</option>
+                  <option value="openrouter">OpenRouter (Multi-Model Hub)</option>
+                  <option value="openai">OpenAI (GPT-4o / o3-mini)</option>
+                  <option value="gemini">Google Gemini (Gemini 2.0 Flash / Pro)</option>
+                  <option value="anthropic">Anthropic Claude (Claude 3.5 Sonnet)</option>
+                  <option value="custom">Custom Endpoint (Ollama, vLLM, Groq)</option>
+                </select>
+              </div>
+
+              <hr style={{ border: 0, borderTop: '1px solid #e5e7eb', margin: '20px 0' }} />
+
+              <h3 style={{ fontSize: '14px', fontWeight: 800, marginBottom: '10px' }}>Cloudflare Workers AI</h3>
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>MODEL ID</label>
+                <input
+                  type="text"
+                  value={settings.cf_ai_model}
+                  onChange={(e) => setSettings({ ...settings, cf_ai_model: e.target.value })}
+                  placeholder="@cf/meta/llama-3.3-70b-instruct"
+                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
+                />
+              </div>
+
+              <hr style={{ border: 0, borderTop: '1px solid #e5e7eb', margin: '20px 0' }} />
+
+              <h3 style={{ fontSize: '14px', fontWeight: 800, marginBottom: '10px' }}>OpenRouter Integration</h3>
+              <div style={{ marginBottom: '10px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>API KEY</label>
+                <input
+                  type="password"
+                  value={settings.openrouter_key || ''}
+                  onChange={(e) => setSettings({ ...settings, openrouter_key: e.target.value })}
+                  placeholder="sk-or-v1-..."
+                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
+                />
+              </div>
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>MODEL</label>
+                <input
+                  type="text"
+                  value={settings.openrouter_model}
+                  onChange={(e) => setSettings({ ...settings, openrouter_model: e.target.value })}
+                  placeholder="anthropic/claude-3.5-sonnet"
+                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
+                />
+              </div>
+
+              <hr style={{ border: 0, borderTop: '1px solid #e5e7eb', margin: '20px 0' }} />
+
+              <h3 style={{ fontSize: '14px', fontWeight: 800, marginBottom: '10px' }}>Custom Endpoint (Ollama / Local / Groq)</h3>
+              <div style={{ marginBottom: '10px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>BASE URL</label>
+                <input
+                  type="text"
+                  value={settings.custom_endpoint || ''}
+                  onChange={(e) => setSettings({ ...settings, custom_endpoint: e.target.value })}
+                  placeholder="http://localhost:11434/v1"
+                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
+                />
+              </div>
+              <div style={{ marginBottom: '10px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>API KEY (Optional)</label>
+                <input
+                  type="password"
+                  value={settings.custom_key || ''}
+                  onChange={(e) => setSettings({ ...settings, custom_key: e.target.value })}
+                  placeholder="Bearer token"
+                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
+                />
+              </div>
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>MODEL NAME</label>
+                <input
+                  type="text"
+                  value={settings.custom_model || ''}
+                  onChange={(e) => setSettings({ ...settings, custom_model: e.target.value })}
+                  placeholder="llama3.3"
+                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
+                <button
+                  onClick={saveSettings}
+                  style={{ padding: '10px 18px', background: '#4262ff', color: '#fff', border: 0, borderRadius: '8px', fontSize: '12px', fontWeight: 700, cursor: 'pointer' }}
+                >
+                  Save Settings
+                </button>
+                <button
+                  onClick={handleTestAI}
+                  disabled={testingAI}
+                  style={{ padding: '10px 18px', background: '#f3f4f6', color: '#374151', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}
+                >
+                  {testingAI ? 'Testing...' : 'Test Active AI Provider ⚡'}
+                </button>
+              </div>
+
+              {testResult && (
+                <div style={{ marginTop: '14px', padding: '10px 14px', borderRadius: '8px', fontSize: '12px', background: testResult.startsWith('✓') ? '#ecfdf5' : '#fef2f2', color: testResult.startsWith('✓') ? '#047857' : '#b91c1c' }}>
+                  {testResult}
+                </div>
+              )}
+            </div>
+          </section>
         )}
 
         {/* Portfolio / App Detail View */}
@@ -414,7 +623,15 @@ export default function Home() {
 
                 <div className="feature-head">
                   <span>ENTERPRISE MODULES</span>
-                  <button onClick={() => viewCode(activeProject.id)}>Inspect Code ↗</button>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button onClick={() => viewCode(activeProject.id)}>Inspect Code ↗</button>
+                    <button
+                      onClick={() => handleDelete(activeProject.id, activeProject.name)}
+                      style={{ color: '#dc2626', border: '1px solid #fca5a5', background: '#fef2f2', borderRadius: '6px', padding: '2px 8px', fontSize: '11px' }}
+                    >
+                      Delete Build 🗑
+                    </button>
+                  </div>
                 </div>
 
                 {['RBAC Auth', 'D1 Database', 'Audit Logging', 'Rate Limiting', 'Edge CORS', 'Queues'].map((f) => (

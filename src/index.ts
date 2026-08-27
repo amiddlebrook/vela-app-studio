@@ -91,24 +91,18 @@ async function issueSessionForId(id: string, secret: string): Promise<{ id: stri
   return { id, cookie: `${SESSION_COOKIE}=${id}.${signature}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000` };
 }
 
+function unsignedAnonymousSessionId(request: Request): string | null {
+  const value = request.headers.get('cookie')?.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`))?.[1];
+  if (!value) return null;
+  const [id] = value.split('.');
+  return id || null;
+}
+
 async function readSession(request: Request, secret: string): Promise<string | null> {
   const value = request.headers.get('cookie')?.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`))?.[1];
   if (!value) return null;
   const [id, signature] = value.split('.');
   return id && signature && (await hmac(id, secret)) === signature ? id : null;
-}
-
-function unsignedAnonymousSessionId(request: Request): string | null {
-  const value = request.headers.get('cookie')?.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`))?.[1];
-  const id = value?.split('.')[0] ?? null;
-  return id && /^[A-Za-z0-9_-]{40,64}$/.test(id) ? id : null;
-}
-
-async function ownerHasState(env: Env, ownerId: string): Promise<boolean> {
-  const row = await env.DB.prepare('SELECT 1 AS present FROM connections WHERE owner_id = ? UNION ALL SELECT 1 AS present FROM projects WHERE owner_id = ? LIMIT 1')
-    .bind(ownerId, ownerId)
-    .first<{ present: number }>();
-  return row?.present === 1;
 }
 
 async function encrypt(value: unknown, key: CryptoKey): Promise<string> {
@@ -132,6 +126,23 @@ function safeSlug(value: string, fallback: string): string {
 
 function messageFromError(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 500) : 'Unknown build error';
+}
+
+function cleanCodeBlock(code: string): string {
+  if (!code) return '';
+  let cleaned = code.trim();
+  cleaned = cleaned.replace(/^```[a-zA-Z0-9_-]*\r?\n?/, '');
+  cleaned = cleaned.replace(/\r?\n?```\s*$/, '');
+  return cleaned.trim();
+}
+
+function sanitizeWorkerSource(name: string, prompt: string, source: string): string {
+  let cleaned = cleanCodeBlock(source);
+  if (!cleaned || !cleaned.includes('export default')) {
+    cleaned = generateEnterpriseScaffoldFallback(name, prompt).backend;
+  }
+  cleaned = cleanCodeBlock(cleaned);
+  return cleaned;
 }
 
 // --- Database Auto-Healing & Schema Guard ---
@@ -245,9 +256,25 @@ async function ensureSchema(env: Env): Promise<void> {
         created_at TEXT NOT NULL,
         UNIQUE(project_id, email)
       );`),
+      env.DB.prepare(`CREATE TABLE IF NOT EXISTS workspace_settings (
+        owner_id TEXT PRIMARY KEY,
+        active_provider TEXT DEFAULT 'auto',
+        openrouter_key_ciphertext TEXT,
+        openrouter_model TEXT DEFAULT 'anthropic/claude-3.5-sonnet',
+        openai_key_ciphertext TEXT,
+        openai_model TEXT DEFAULT 'gpt-4o',
+        gemini_key_ciphertext TEXT,
+        gemini_model TEXT DEFAULT 'gemini-2.0-flash',
+        anthropic_key_ciphertext TEXT,
+        anthropic_model TEXT DEFAULT 'claude-3-5-sonnet-20241022',
+        cf_ai_model TEXT DEFAULT '@cf/meta/llama-3.3-70b-instruct',
+        custom_endpoint TEXT,
+        custom_key_ciphertext TEXT,
+        custom_model TEXT,
+        updated_at TEXT NOT NULL
+      );`),
     ]);
 
-    // Safety checks for existing tables missing new columns
     try { await env.DB.prepare('ALTER TABLE build_events ADD COLUMN stage TEXT;').run(); } catch {}
     try { await env.DB.prepare('ALTER TABLE projects ADD COLUMN scaffolding_json TEXT;').run(); } catch {}
     try { await env.DB.prepare('ALTER TABLE projects ADD COLUMN plan_json TEXT;').run(); } catch {}
@@ -259,6 +286,123 @@ async function ensureSchema(env: Env): Promise<void> {
   } catch (err) {
     console.warn('ensureSchema warning:', err);
   }
+}
+
+// --- Workspace Settings & AI Provider Toolbox ---
+
+export type WorkspaceSettings = {
+  active_provider: string;
+  openrouter_key?: string;
+  openrouter_model: string;
+  openai_key?: string;
+  openai_model: string;
+  gemini_key?: string;
+  gemini_model: string;
+  anthropic_key?: string;
+  anthropic_model: string;
+  cf_ai_model: string;
+  custom_endpoint?: string;
+  custom_key?: string;
+  custom_model?: string;
+};
+
+async function getWorkspaceSettings(env: Env, ownerId: string, decrypted = false): Promise<WorkspaceSettings> {
+  const row = await env.DB.prepare('SELECT * FROM workspace_settings WHERE owner_id = ?').bind(ownerId).first<any>();
+  if (!row) {
+    return {
+      active_provider: 'auto',
+      openrouter_model: env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet',
+      openai_model: env.OPENAI_MODEL || 'gpt-4o',
+      gemini_model: env.GEMINI_MODEL || 'gemini-2.0-flash',
+      anthropic_model: env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022',
+      cf_ai_model: '@cf/meta/llama-3.3-70b-instruct',
+    };
+  }
+
+  const decryptKey = async (ciphertext?: string | null): Promise<string | undefined> => {
+    if (!ciphertext) return undefined;
+    if (!decrypted) return '••••••••••••';
+    try {
+      return JSON.parse(await decrypt(ciphertext, env.TOKEN_ENCRYPTION_KEY)) as string;
+    } catch {
+      return undefined;
+    }
+  };
+
+  return {
+    active_provider: row.active_provider || 'auto',
+    openrouter_key: await decryptKey(row.openrouter_key_ciphertext),
+    openrouter_model: row.openrouter_model || env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet',
+    openai_key: await decryptKey(row.openai_key_ciphertext),
+    openai_model: row.openai_model || env.OPENAI_MODEL || 'gpt-4o',
+    gemini_key: await decryptKey(row.gemini_key_ciphertext),
+    gemini_model: row.gemini_model || env.GEMINI_MODEL || 'gemini-2.0-flash',
+    anthropic_key: await decryptKey(row.anthropic_key_ciphertext),
+    anthropic_model: row.anthropic_model || env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022',
+    cf_ai_model: row.cf_ai_model || '@cf/meta/llama-3.3-70b-instruct',
+    custom_endpoint: row.custom_endpoint || undefined,
+    custom_key: await decryptKey(row.custom_key_ciphertext),
+    custom_model: row.custom_model || undefined,
+  };
+}
+
+async function saveWorkspaceSettings(env: Env, ownerId: string, settings: Partial<WorkspaceSettings>): Promise<void> {
+  const existing = await env.DB.prepare('SELECT * FROM workspace_settings WHERE owner_id = ?').bind(ownerId).first<any>();
+  const now = new Date().toISOString();
+
+  const encryptKey = async (newVal?: string, oldCiphertext?: string): Promise<string | null> => {
+    if (!newVal || newVal.includes('••••')) return oldCiphertext || null;
+    return await encrypt(newVal.trim(), env.TOKEN_ENCRYPTION_KEY);
+  };
+
+  const openrouter_key_ciphertext = await encryptKey(settings.openrouter_key, existing?.openrouter_key_ciphertext);
+  const openai_key_ciphertext = await encryptKey(settings.openai_key, existing?.openai_key_ciphertext);
+  const gemini_key_ciphertext = await encryptKey(settings.gemini_key, existing?.gemini_key_ciphertext);
+  const anthropic_key_ciphertext = await encryptKey(settings.anthropic_key, existing?.anthropic_key_ciphertext);
+  const custom_key_ciphertext = await encryptKey(settings.custom_key, existing?.custom_key_ciphertext);
+
+  await env.DB.prepare(`INSERT INTO workspace_settings (
+    owner_id, active_provider,
+    openrouter_key_ciphertext, openrouter_model,
+    openai_key_ciphertext, openai_model,
+    gemini_key_ciphertext, gemini_model,
+    anthropic_key_ciphertext, anthropic_model,
+    cf_ai_model,
+    custom_endpoint, custom_key_ciphertext, custom_model,
+    updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(owner_id) DO UPDATE SET
+    active_provider = excluded.active_provider,
+    openrouter_key_ciphertext = excluded.openrouter_key_ciphertext,
+    openrouter_model = excluded.openrouter_model,
+    openai_key_ciphertext = excluded.openai_key_ciphertext,
+    openai_model = excluded.openai_model,
+    gemini_key_ciphertext = excluded.gemini_key_ciphertext,
+    gemini_model = excluded.gemini_model,
+    anthropic_key_ciphertext = excluded.anthropic_key_ciphertext,
+    anthropic_model = excluded.anthropic_model,
+    cf_ai_model = excluded.cf_ai_model,
+    custom_endpoint = excluded.custom_endpoint,
+    custom_key_ciphertext = excluded.custom_key_ciphertext,
+    custom_model = excluded.custom_model,
+    updated_at = excluded.updated_at
+  `).bind(
+    ownerId,
+    settings.active_provider || existing?.active_provider || 'auto',
+    openrouter_key_ciphertext,
+    settings.openrouter_model || existing?.openrouter_model || 'anthropic/claude-3.5-sonnet',
+    openai_key_ciphertext,
+    settings.openai_model || existing?.openai_model || 'gpt-4o',
+    gemini_key_ciphertext,
+    settings.gemini_model || existing?.gemini_model || 'gemini-2.0-flash',
+    anthropic_key_ciphertext,
+    settings.anthropic_model || existing?.anthropic_model || 'claude-3-5-sonnet-20241022',
+    settings.cf_ai_model || existing?.cf_ai_model || '@cf/meta/llama-3.3-70b-instruct',
+    settings.custom_endpoint || existing?.custom_endpoint || null,
+    custom_key_ciphertext,
+    settings.custom_model || existing?.custom_model || null,
+    now
+  ).run();
 }
 
 // --- Multi-LLM Provider Engine ---
@@ -285,15 +429,53 @@ export type ScaffoldResult = {
   instructions: string;
 };
 
-async function callLLM(env: Env, messages: Array<{ role: string; content: string }>): Promise<string> {
-  // 1. Try OpenRouter
-  if (env.OPENROUTER_API_KEY) {
+async function callLLM(env: Env, messages: Array<{ role: string; content: string }>, ownerId?: string): Promise<string> {
+  let settings: WorkspaceSettings | null = null;
+  if (ownerId) {
+    try { settings = await getWorkspaceSettings(env, ownerId, true); } catch {}
+  }
+
+  const openrouterKey = settings?.openrouter_key || env.OPENROUTER_API_KEY;
+  const openrouterModel = settings?.openrouter_model || env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet';
+
+  const openaiKey = settings?.openai_key || env.OPENAI_API_KEY;
+  const openaiModel = settings?.openai_model || env.OPENAI_MODEL || 'gpt-4o';
+
+  const geminiKey = settings?.gemini_key || env.GEMINI_API_KEY;
+  const geminiModel = settings?.gemini_model || env.GEMINI_MODEL || 'gemini-2.0-flash';
+
+  const anthropicKey = settings?.anthropic_key || env.ANTHROPIC_API_KEY;
+  const anthropicModel = settings?.anthropic_model || env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022';
+
+  const cfModel = settings?.cf_ai_model || '@cf/meta/llama-3.3-70b-instruct';
+
+  // 1. Check Custom Endpoint if active
+  if (settings?.custom_endpoint && (settings.active_provider === 'custom' || settings.active_provider === 'auto')) {
     try {
-      const model = env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (settings.custom_key) headers['Authorization'] = `Bearer ${settings.custom_key}`;
+      const res = await fetch(`${settings.custom_endpoint.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ model: settings.custom_model || 'default', messages }),
+      });
+      if (res.ok) {
+        const data = await res.json<{ choices?: Array<{ message?: { content?: string } }> }>();
+        const content = data.choices?.[0]?.message?.content;
+        if (content) return content;
+      }
+    } catch (e) {
+      console.warn('Custom LLM endpoint error:', e);
+    }
+  }
+
+  // 2. Try OpenRouter
+  if (openrouterKey && (settings?.active_provider === 'openrouter' || settings?.active_provider === 'auto' || !settings?.active_provider)) {
+    try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.OPENROUTER_API_KEY}` },
-        body: JSON.stringify({ model, messages }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openrouterKey}` },
+        body: JSON.stringify({ model: openrouterModel, messages }),
       });
       if (res.ok) {
         const data = await res.json<{ choices?: Array<{ message?: { content?: string } }> }>();
@@ -305,14 +487,23 @@ async function callLLM(env: Env, messages: Array<{ role: string; content: string
     }
   }
 
-  // 2. Try OpenAI
-  if (env.OPENAI_API_KEY) {
+  // 3. Try Cloudflare Workers AI
+  if (env.AI && typeof env.AI.run === 'function' && (settings?.active_provider === 'cloudflare' || settings?.active_provider === 'auto' || !settings?.active_provider)) {
     try {
-      const model = env.OPENAI_MODEL || 'gpt-4o';
+      const response = await env.AI.run(cfModel, { messages });
+      if (response && response.response) return response.response;
+    } catch (e) {
+      console.warn('Workers AI request error:', e);
+    }
+  }
+
+  // 4. Try OpenAI
+  if (openaiKey && (settings?.active_provider === 'openai' || settings?.active_provider === 'auto' || !settings?.active_provider)) {
+    try {
       const res = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.OPENAI_API_KEY}` },
-        body: JSON.stringify({ model, messages }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openaiKey}` },
+        body: JSON.stringify({ model: openaiModel, messages }),
       });
       if (res.ok) {
         const data = await res.json<{ choices?: Array<{ message?: { content?: string } }> }>();
@@ -324,12 +515,11 @@ async function callLLM(env: Env, messages: Array<{ role: string; content: string
     }
   }
 
-  // 3. Try Gemini
-  if (env.GEMINI_API_KEY) {
+  // 5. Try Gemini
+  if (geminiKey && (settings?.active_provider === 'gemini' || settings?.active_provider === 'auto' || !settings?.active_provider)) {
     try {
-      const model = env.GEMINI_MODEL || 'gemini-2.0-flash';
       const prompt = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`, {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
@@ -344,13 +534,32 @@ async function callLLM(env: Env, messages: Array<{ role: string; content: string
     }
   }
 
-  // 4. Try Cloudflare Workers AI
-  if (env.AI && typeof env.AI.run === 'function') {
+  // 6. Try Anthropic
+  if (anthropicKey && (settings?.active_provider === 'anthropic' || settings?.active_provider === 'auto' || !settings?.active_provider)) {
     try {
-      const response = await env.AI.run('@cf/meta/llama-3.3-70b-instruct', { messages });
-      if (response && response.response) return response.response;
+      const system = messages.find(m => m.role === 'system')?.content;
+      const userMessages = messages.filter(m => m.role !== 'system');
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': anthropicKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: anthropicModel,
+          max_tokens: 4096,
+          system,
+          messages: userMessages,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json<{ content?: Array<{ text?: string }> }>();
+        const content = data.content?.[0]?.text;
+        if (content) return content;
+      }
     } catch (e) {
-      console.warn('Workers AI request error:', e);
+      console.warn('Anthropic request error:', e);
     }
   }
 
@@ -398,7 +607,7 @@ function generateEnterprisePlanFallback(prompt: string): PlanResult {
   };
 }
 
-async function planAppWithLLM(env: Env, prompt: string): Promise<PlanResult> {
+async function planAppWithLLM(env: Env, prompt: string, ownerId?: string): Promise<PlanResult> {
   const systemPrompt = `You are Vela, a world-class enterprise full-stack architect. Generate a complete, production-ready MVP plan from this natural language prompt.
 Output EXACTLY this JSON format and nothing else:
 {
@@ -420,7 +629,7 @@ CRITICAL: Output ONLY valid JSON enclosed in curly braces. No markdown, no conve
     const content = await callLLM(env, [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: 'Plan this enterprise application: ' + prompt },
-    ]);
+    ], ownerId);
 
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
@@ -514,12 +723,10 @@ export default {
     }
 
     try {
-      // Health check endpoint
       if (url.pathname === '/api/health') {
-        return jsonResponse({ ok: true, app: APP_NAME, uptime: process.uptime?.() || 0, time: new Date().toISOString() });
+        return jsonResponse({ ok: true, app: APP_NAME, time: new Date().toISOString() });
       }
 
-      // API: List items
       if (url.pathname === '/api/items' && method === 'GET') {
         if (env.DB) {
           const results = await env.DB.prepare('SELECT * FROM items ORDER BY updated_at DESC LIMIT 100').all();
@@ -533,7 +740,6 @@ export default {
         });
       }
 
-      // API: Create item
       if (url.pathname === '/api/items' && method === 'POST') {
         const body = await request.json();
         const id = crypto.randomUUID();
@@ -553,7 +759,6 @@ export default {
         return jsonResponse({ ok: true, item: { id, title, category, status: 'Active', priority, created_at: now, updated_at: now } }, 201);
       }
 
-      // API: Audit log
       if (url.pathname === '/api/audit' && method === 'GET') {
         if (env.DB) {
           const logs = await env.DB.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 50').all();
@@ -562,7 +767,6 @@ export default {
         return jsonResponse({ audit_logs: [] });
       }
 
-      // Serve Full-Stack SPA Frontend
       const appHtml = \`<!doctype html>
 <html lang="en">
 <head>
@@ -591,7 +795,6 @@ export default {
       </div>
     </header>
 
-    <!-- Metrics -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4 my-8">
       <div class="p-5 bg-slate-900/80 border border-slate-800 rounded-2xl">
         <span class="text-xs text-slate-400 font-medium">Status</span>
@@ -610,7 +813,6 @@ export default {
       </div>
     </div>
 
-    <!-- Main Table -->
     <div class="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl">
       <div class="p-5 border-b border-slate-800 flex justify-between items-center">
         <h2 class="text-base font-bold text-white">Records & Activity</h2>
@@ -634,7 +836,6 @@ export default {
     </div>
   </div>
 
-  <!-- Create Modal -->
   <div id="modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm hidden place-items-center p-4 z-50">
     <div class="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-md">
       <h3 class="text-lg font-bold text-white mb-4">Add New Record</h3>
@@ -808,7 +1009,7 @@ export default function EnterpriseApp() {
   return { frontend, backend, database: schema, config, instructions };
 }
 
-async function scaffoldAppWithLLM(env: Env, prompt: string, plan?: PlanResult | null): Promise<ScaffoldResult> {
+async function scaffoldAppWithLLM(env: Env, prompt: string, plan?: PlanResult | null, ownerId?: string): Promise<ScaffoldResult> {
   const systemPrompt = `You are Vela, an elite agentic full-stack app builder. Given a natural language prompt and architecture plan, generate production-ready code.
 Generate code in these labeled sections:
 FRONTEND: Complete React/Next.js component with Tailwind CSS.
@@ -817,13 +1018,13 @@ DATABASE: Complete D1 SQL schema (CREATE TABLE statements with indexes, audit_lo
 CONFIG: Valid wrangler.jsonc configuration with D1 database binding.
 INSTRUCTIONS: Concise Markdown documentation.
 
-CRITICAL: Output ONLY the labeled code sections. Format each section header as FRONTEND:, BACKEND:, DATABASE:, CONFIG:, INSTRUCTIONS:.`;
+CRITICAL: Output ONLY the labeled code sections. Format each section header as FRONTEND:, BACKEND:, DATABASE:, CONFIG:, INSTRUCTIONS:. DO NOT wrap sections in markdown backticks.`;
 
   try {
     const content = await callLLM(env, [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: `Scaffold full-stack app for: ${prompt}\nPlan: ${JSON.stringify(plan || {})}` },
-    ]);
+    ], ownerId);
 
     const result: ScaffoldResult = { frontend: '', backend: '', database: '', config: '', instructions: '' };
     const sections = content.split(/\n(?=^(FRONTEND|BACKEND|DATABASE|CONFIG|INSTRUCTIONS):)/m);
@@ -831,11 +1032,12 @@ CRITICAL: Output ONLY the labeled code sections. Format each section header as F
       const match = section.match(/^(FRONTEND|BACKEND|DATABASE|CONFIG|INSTRUCTIONS):\s*([\s\S]*)$/m);
       if (match) {
         const key = match[1].toLowerCase() as keyof ScaffoldResult;
-        result[key] = match[2].trim();
+        result[key] = cleanCodeBlock(match[2]);
       }
     }
 
     if (result.backend && (result.frontend || result.database)) {
+      result.backend = sanitizeWorkerSource(plan?.name || 'app', prompt, result.backend);
       return result;
     }
   } catch (e) {
@@ -915,7 +1117,6 @@ async function githubRequest<T>(token: string, path: string, init: RequestInit =
 }
 
 async function putGithubFile(token: string, repository: string, path: string, content: string, message: string): Promise<void> {
-  // Check if file exists to provide sha for update
   let sha: string | undefined;
   try {
     const existing = await githubRequest<{ sha: string }>(token, `/repos/${repository}/contents/${path}`);
@@ -924,7 +1125,7 @@ async function putGithubFile(token: string, repository: string, path: string, co
 
   const body: Record<string, unknown> = {
     message,
-    content: base64(encoder.encode(content)),
+    content: base64(encoder.encode(cleanCodeBlock(content))),
   };
   if (sha) body.sha = sha;
 
@@ -936,9 +1137,10 @@ async function putGithubFile(token: string, repository: string, path: string, co
 }
 
 async function deployStandaloneWorker(token: string, accountId: string, workerName: string, source: string): Promise<void> {
+  const cleanSource = sanitizeWorkerSource(workerName, 'Standalone App', source);
   const form = new FormData();
   form.set('metadata', JSON.stringify({ main_module: 'worker.mjs', compatibility_date: '2026-08-25' }));
-  form.set('worker.mjs', new Blob([source], { type: 'application/javascript+module' }), 'worker.mjs');
+  form.set('worker.mjs', new Blob([cleanSource], { type: 'application/javascript+module' }), 'worker.mjs');
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(workerName)}`, {
     method: 'PUT',
     headers: { authorization: `Bearer ${token}` },
@@ -1102,6 +1304,14 @@ async function refreshCloudflareConnectionIfNeeded(env: Env, ownerId: string): P
   }
 }
 
+async function ownerHasState(env: Env, ownerId: string): Promise<boolean> {
+  const [projectCount, connectionCount] = await Promise.all([
+    env.DB.prepare('SELECT COUNT(*) AS count FROM projects WHERE owner_id = ?').bind(ownerId).first<{ count: number }>(),
+    env.DB.prepare('SELECT COUNT(*) AS count FROM connections WHERE owner_id = ? AND status = ?').bind(ownerId, 'connected').first<{ count: number }>(),
+  ]);
+  return Boolean((projectCount?.count ?? 0) > 0 || (connectionCount?.count ?? 0) > 0);
+}
+
 async function completeGoogleLogin(env: Env, anonymousOwnerId: string, identity: ProviderIdentity): Promise<{ ownerId: string; cookie: string }> {
   const ownerId = `google:${identity.id}`;
   const now = new Date().toISOString();
@@ -1157,14 +1367,13 @@ export async function buildStandaloneApp(env: Env, projectId: string, resumeFrom
     await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('planning', now, projectId).run();
     await recordEvent(env, projectId, 'plan_started', 'Generating enterprise MVP plan and architecture blueprint', 'planning');
     
-    plan = await planAppWithLLM(env, project.prompt);
+    plan = await planAppWithLLM(env, project.prompt, project.owner_id);
     await env.DB.prepare('UPDATE projects SET plan_json = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(plan), new Date().toISOString(), projectId).run();
     await recordEvent(env, projectId, 'plan_generated', `Architecture blueprint ready: ${plan.features.length} features, ${plan.techStack.length} tech modules`, 'planning');
     
-    // PAUSE: await user review and approval
     await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('awaiting_approval', new Date().toISOString(), projectId).run();
     await recordEvent(env, projectId, 'awaiting_approval', 'Plan ready for review — awaiting your approval to generate full-stack code', 'awaiting_approval');
-    return; // Queue worker stops here until approval
+    return;
   } else {
     const existing = await env.DB.prepare('SELECT plan_json, scaffolding_json FROM projects WHERE id = ?').bind(projectId).first<{ plan_json: string | null; scaffolding_json: string | null }>();
     plan = existing?.plan_json ? JSON.parse(existing.plan_json) : null;
@@ -1178,12 +1387,12 @@ export async function buildStandaloneApp(env: Env, projectId: string, resumeFrom
     await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('scaffolding', new Date().toISOString(), projectId).run();
     await recordEvent(env, projectId, 'scaffolding_started', 'AI agent generating full-stack code (React UI, Cloudflare Worker API, D1 schema, wrangler config)', 'scaffolding');
     
-    scaffolding = await scaffoldAppWithLLM(env, project.prompt, plan);
+    scaffolding = await scaffoldAppWithLLM(env, project.prompt, plan, project.owner_id);
     await env.DB.prepare('UPDATE projects SET scaffolding_json = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(scaffolding), new Date().toISOString(), projectId).run();
     await recordEvent(env, projectId, 'scaffolding_complete', `Generated ${scaffolding.backend.length}B API worker, ${scaffolding.frontend.length}B React UI, ${scaffolding.database.length}B D1 schema`, 'scaffolding');
   }
 
-  const source = scaffolding.backend;
+  const source = sanitizeWorkerSource(project.name, project.prompt, scaffolding.backend);
 
   // --- Stage 3: Repository Creation & Commit ---
   if (!project.github_repository) {
@@ -1262,7 +1471,7 @@ function enterpriseDashboard(): Response {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Vela — Enterprise App Studio</title>
+  <title>Vela — Enterprise App Studio &amp; AI Toolbox</title>
   <style>
     :root {
       --bg: #070913;
@@ -1322,11 +1531,11 @@ function enterpriseDashboard(): Response {
     .grid-composer { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 20px; margin-bottom: 36px; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 24px; }
     .card h2 { font-size: 17px; font-weight: 700; margin-bottom: 12px; }
-    input, textarea {
+    input, textarea, select {
       width: 100%; background: #080b18; border: 1px solid #293456; border-radius: 12px;
       padding: 12px 14px; color: var(--ink); font: inherit; outline: none; margin-bottom: 10px;
     }
-    input:focus, textarea:focus { border-color: var(--border-focus); }
+    input:focus, textarea:focus, select:focus { border-color: var(--border-focus); }
     textarea { min-height: 110px; resize: vertical; }
     button.primary {
       background: var(--blue); color: #fff; border: 0; border-radius: 12px; padding: 12px 20px;
@@ -1337,6 +1546,11 @@ function enterpriseDashboard(): Response {
       background: var(--card-alt); color: var(--ink); border: 1px solid var(--border);
       border-radius: 10px; padding: 8px 14px; font-weight: 600; font-size: 12px; cursor: pointer;
     }
+    button.danger {
+      background: #321017; color: var(--rose); border: 1px solid #5c1e29;
+      border-radius: 10px; padding: 8px 14px; font-weight: 600; font-size: 12px; cursor: pointer;
+    }
+    button.danger:hover { background: #4a131f; }
     .badge {
       display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700;
       padding: 4px 10px; border-radius: 99px; text-transform: uppercase; letter-spacing: 0.05em;
@@ -1384,9 +1598,10 @@ function enterpriseDashboard(): Response {
   <header class="nav">
     <div class="brand"><span>V</span> Vela Studio</div>
     <div class="nav-tabs">
-      <button class="tab-btn active" onclick="switchView('builds')">Studio & Builds</button>
+      <button class="tab-btn active" onclick="switchView('builds')">Studio &amp; Builds</button>
+      <button class="tab-btn" onclick="switchView('toolbox')">AI Toolbox &amp; Providers</button>
       <button class="tab-btn" onclick="switchView('audit')">Audit Logs</button>
-      <button class="tab-btn" onclick="switchView('usage')">FinOps & Usage</button>
+      <button class="tab-btn" onclick="switchView('usage')">FinOps &amp; Usage</button>
     </div>
     <div class="conns">
       <div class="conn-pill"><span id="gh-dot" class="dot"></span> GitHub <button class="secondary" style="padding:2px 8px;font-size:10px" onclick="location.href='/auth/github/start'">OAuth</button></div>
@@ -1418,7 +1633,7 @@ function enterpriseDashboard(): Response {
             <p>✦ <b>Zero-Trust Security</b>: Pre-configured RBAC, Web Crypto token encryption &amp; OWASP headers.</p>
             <p>✦ <b>Edge Native</b>: Cloudflare Workers, D1 SQLite databases, and Queues.</p>
             <p>✦ <b>Full Source Ownership</b>: Standalone private GitHub repository per application.</p>
-            <p>✦ <b>Architecture Review</b>: Inspect and modify AI blueprints before code synthesis.</p>
+            <p>✦ <b>Manageable Toolbox</b>: Configure OpenRouter, Cloudflare Workers AI, OpenAI, Gemini, &amp; Anthropic.</p>
           </div>
         </article>
       </div>
@@ -1432,10 +1647,60 @@ function enterpriseDashboard(): Response {
       </section>
     </div>
 
+    <!-- AI Toolbox View -->
+    <div id="view-toolbox" style="display:none">
+      <h2 style="font-size:24px;font-weight:800;margin-bottom:8px">AI Provider Toolbox &amp; Models</h2>
+      <p style="color:var(--muted);font-size:14px;margin-bottom:24px">Manage LLM keys, select planning models, and test connections for OpenRouter, Cloudflare Workers AI, and custom providers.</p>
+      
+      <div class="card" style="max-width:800px;margin-bottom:24px">
+        <h3 style="font-size:16px;font-weight:700;margin-bottom:14px">Active Provider &amp; Routing</h3>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">PRIMARY AI ROUTING</label>
+        <select id="setting-provider">
+          <option value="auto">Auto (Failover: Custom → OpenRouter → Cloudflare AI → OpenAI → Gemini)</option>
+          <option value="cloudflare">Cloudflare Workers AI (Edge Native)</option>
+          <option value="openrouter">OpenRouter (Multi-Model Hub)</option>
+          <option value="openai">OpenAI (GPT-4o / o3-mini)</option>
+          <option value="gemini">Google Gemini (Gemini 2.0 Flash / Pro)</option>
+          <option value="anthropic">Anthropic Claude (Claude 3.5 Sonnet)</option>
+          <option value="custom">Custom OpenAI-Compatible Endpoint (Ollama, vLLM, Groq)</option>
+        </select>
+
+        <hr style="border:0;border-top:1px solid var(--border);margin:20px 0">
+
+        <h3 style="font-size:16px;font-weight:700;margin-bottom:14px">Cloudflare Workers AI</h3>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">MODEL ID</label>
+        <input id="setting-cf-model" placeholder="@cf/meta/llama-3.3-70b-instruct">
+
+        <hr style="border:0;border-top:1px solid var(--border);margin:20px 0">
+
+        <h3 style="font-size:16px;font-weight:700;margin-bottom:14px">OpenRouter Integration</h3>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">API KEY</label>
+        <input id="setting-or-key" type="password" placeholder="sk-or-v1-...">
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">MODEL</label>
+        <input id="setting-or-model" placeholder="anthropic/claude-3.5-sonnet">
+
+        <hr style="border:0;border-top:1px solid var(--border);margin:20px 0">
+
+        <h3 style="font-size:16px;font-weight:700;margin-bottom:14px">Custom Endpoint (Ollama / Local / Groq / vLLM)</h3>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">BASE URL (e.g. http://localhost:11434/v1)</label>
+        <input id="setting-custom-url" placeholder="https://api.groq.com/openai/v1">
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">API KEY (Optional)</label>
+        <input id="setting-custom-key" type="password" placeholder="gsk_...">
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">MODEL NAME</label>
+        <input id="setting-custom-model" placeholder="llama-3.3-70b-versatile">
+
+        <div style="display:flex;gap:10px;margin-top:20px">
+          <button class="primary" onclick="saveSettings()">Save AI Toolbox Settings</button>
+          <button class="secondary" onclick="testAI()">Test Active Provider ⚡</button>
+        </div>
+        <div id="ai-test-result" style="font-size:12px;margin-top:12px"></div>
+      </div>
+    </div>
+
     <!-- Audit View -->
     <div id="view-audit" style="display:none">
       <h2 style="font-size:24px;font-weight:800;margin-bottom:8px">Security &amp; Audit Trail</h2>
-      <p style="color:var(--muted);font-size:14px;margin-bottom:24px">Immutable compliance record of all actions, approvals, and deployments across your workspace.</p>
+      <p style="color:var(--muted);font-size:14px;margin-bottom:24px">Immutable compliance record of all actions, approvals, deletions, and deployments across your workspace.</p>
       <div class="card" id="audit-list">Loading audit logs...</div>
     </div>
 
@@ -1480,9 +1745,11 @@ function enterpriseDashboard(): Response {
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       event.target.classList.add('active');
       document.getElementById('view-builds').style.display = view === 'builds' ? 'block' : 'none';
+      document.getElementById('view-toolbox').style.display = view === 'toolbox' ? 'block' : 'none';
       document.getElementById('view-audit').style.display = view === 'audit' ? 'block' : 'none';
       document.getElementById('view-usage').style.display = view === 'usage' ? 'block' : 'none';
       if (view === 'audit') loadAuditLogs();
+      if (view === 'toolbox') loadSettings();
     }
 
     async function loadWorkspace() {
@@ -1544,6 +1811,7 @@ function enterpriseDashboard(): Response {
         const repoUrl = p.github_repository ? \`<a href="https://github.com/\${esc(p.github_repository)}" target="_blank" class="secondary" style="text-decoration:none">GitHub Repo ↗</a>\` : '';
         const codeBtn = p.scaffolding_json ? \`<button class="secondary" onclick="inspectCode('\${p.id}')">Inspect Code</button>\` : '';
         const retryBtn = p.status === 'failed' ? \`<button class="secondary" onclick="retryBuild('\${p.id}')">Retry Build</button>\` : '';
+        const deleteBtn = \`<button class="danger" onclick="deleteProject('\${p.id}', '\${esc(p.name)}')">Delete Build 🗑</button>\`;
 
         return \`
           <article class="project-card">
@@ -1559,7 +1827,7 @@ function enterpriseDashboard(): Response {
             \${p.latest_event ? \`<div style="font-size:12px;color:var(--muted);margin-bottom:12px"><b>\${esc(p.latest_event.kind)}</b>: \${esc(p.latest_event.detail)}</div>\` : ''}
             \${planHtml}
             <div class="action-row">
-              \${appUrl} \${repoUrl} \${codeBtn} \${retryBtn}
+              \${appUrl} \${repoUrl} \${codeBtn} \${retryBtn} \${deleteBtn}
             </div>
           </article>
         \`;
@@ -1587,6 +1855,14 @@ function enterpriseDashboard(): Response {
       } catch (err) {
         st.textContent = err.message;
       }
+    }
+
+    async function deleteProject(id, name) {
+      if (!confirm(\`Are you sure you want to delete build "\${name}"? This action is permanent.\`)) return;
+      try {
+        await api(\`/projects/\${id}\`, { method: 'DELETE' });
+        await loadWorkspace();
+      } catch (e) { alert(e.message); }
     }
 
     async function approvePlan(id) {
@@ -1636,6 +1912,53 @@ function enterpriseDashboard(): Response {
         \`;
         document.getElementById('inspector-modal').classList.add('open');
       } catch (e) { alert(e.message); }
+    }
+
+    async function loadSettings() {
+      try {
+        const data = await api('/settings');
+        document.getElementById('setting-provider').value = data.active_provider || 'auto';
+        document.getElementById('setting-cf-model').value = data.cf_ai_model || '@cf/meta/llama-3.3-70b-instruct';
+        document.getElementById('setting-or-key').value = data.openrouter_key || '';
+        document.getElementById('setting-or-model').value = data.openrouter_model || 'anthropic/claude-3.5-sonnet';
+        document.getElementById('setting-custom-url').value = data.custom_endpoint || '';
+        document.getElementById('setting-custom-key').value = data.custom_key || '';
+        document.getElementById('setting-custom-model').value = data.custom_model || '';
+      } catch (e) {}
+    }
+
+    async function saveSettings() {
+      try {
+        const payload = {
+          active_provider: document.getElementById('setting-provider').value,
+          cf_ai_model: document.getElementById('setting-cf-model').value,
+          openrouter_key: document.getElementById('setting-or-key').value,
+          openrouter_model: document.getElementById('setting-or-model').value,
+          custom_endpoint: document.getElementById('setting-custom-url').value,
+          custom_key: document.getElementById('setting-custom-key').value,
+          custom_model: document.getElementById('setting-custom-model').value,
+        };
+        await api('/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        alert('AI Toolbox settings saved successfully!');
+      } catch (e) { alert(e.message); }
+    }
+
+    async function testAI() {
+      const resEl = document.getElementById('ai-test-result');
+      resEl.textContent = 'Testing generation...';
+      resEl.style.color = 'var(--cyan)';
+      try {
+        const res = await api('/settings/test-llm', { method: 'POST' });
+        resEl.textContent = \`✓ Generation Successful in \${res.latency_ms}ms: "\${res.response}"\`;
+        resEl.style.color = 'var(--mint)';
+      } catch (e) {
+        resEl.textContent = '✕ Test failed: ' + e.message;
+        resEl.style.color = 'var(--rose)';
+      }
     }
 
     async function loadAuditLogs() {
@@ -1791,6 +2114,33 @@ const workerHandler = {
       return json({ audit_logs: logs.results || [] });
     }
 
+    if (url.pathname === '/settings' && request.method === 'GET') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      return json(await getWorkspaceSettings(env, sessionId, false));
+    }
+
+    if (url.pathname === '/settings' && request.method === 'POST') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const body = await request.json<Partial<WorkspaceSettings>>();
+      await saveWorkspaceSettings(env, sessionId, body);
+      await recordAuditLog(env, sessionId, 'SETTINGS_UPDATED', `Updated AI toolbox configuration (Provider: ${body.active_provider || 'auto'})`);
+      return json({ ok: true });
+    }
+
+    if (url.pathname === '/settings/test-llm' && request.method === 'POST') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const start = Date.now();
+      try {
+        const response = await callLLM(env, [
+          { role: 'user', content: 'Say "Vela AI Toolbox connection operational" in 5 words or less.' }
+        ], sessionId);
+        const latency = Date.now() - start;
+        return json({ ok: true, latency_ms: latency, response: response.trim() });
+      } catch (err: unknown) {
+        return json({ ok: false, error: err instanceof Error ? err.message : 'LLM test failed' }, { status: 502 });
+      }
+    }
+
     if (url.pathname === '/projects' && request.method === 'POST') {
       if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
       const body = await request.json<{ name?: string; prompt?: string }>();
@@ -1816,6 +2166,170 @@ const workerHandler = {
       return json({ project: await projectForOwner(env, id, sessionId) }, { status: 201 });
     }
 
+    const projectDeleteMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})$/);
+    if (projectDeleteMatch && request.method === 'DELETE') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, projectDeleteMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+
+      // Clean up Cloudflare Worker if deployed
+      if (project.worker_name && env.CLOUDFLARE_ACCOUNT_ID) {
+        try {
+          const cloudflare = await connectedToken(env, sessionId, 'cloudflare');
+          await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID)}/workers/scripts/${encodeURIComponent(project.worker_name)}`, {
+            method: 'DELETE',
+            headers: { authorization: `Bearer ${cloudflare.accessToken}` },
+          });
+        } catch (e) {
+          console.warn('Worker deletion warning:', e);
+        }
+      }
+
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM build_events WHERE project_id = ?').bind(project.id),
+        env.DB.prepare('DELETE FROM project_features WHERE project_id = ?').bind(project.id),
+        env.DB.prepare('DELETE FROM usage_events WHERE project_id = ?').bind(project.id),
+        env.DB.prepare('DELETE FROM project_secrets WHERE project_id = ?').bind(project.id),
+        env.DB.prepare('DELETE FROM project_deployments WHERE project_id = ?').bind(project.id),
+        env.DB.prepare('DELETE FROM project_collaborators WHERE project_id = ?').bind(project.id),
+        env.DB.prepare('DELETE FROM projects WHERE id = ? AND owner_id = ?').bind(project.id, sessionId),
+      ]);
+
+      await recordAuditLog(env, sessionId, 'PROJECT_DELETED', `Deleted project "${project.name}" (${project.id})`);
+      return json({ ok: true, deleted: project.id });
+    }
+
+    // --- PATCH /projects/:id - Rename / Update Project ---
+    const projectPatchMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})$/);
+    if (projectPatchMatch && request.method === 'PATCH') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, projectPatchMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+
+      const body = await request.json<{ name?: string; prompt?: string }>();
+      const updates: string[] = [];
+      const binds: unknown[] = [];
+
+      if (body.name?.trim()) {
+        updates.push('name = ?');
+        binds.push(body.name.trim().slice(0, 80));
+      }
+      if (body.prompt?.trim()) {
+        updates.push('prompt = ?');
+        binds.push(body.prompt.trim().slice(0, 4000));
+      }
+
+      if (updates.length === 0) return json({ error: 'No valid fields to update' }, { status: 400 });
+
+      updates.push('updated_at = ?');
+      binds.push(new Date().toISOString(), project.id);
+
+      await env.DB.prepare(`UPDATE projects SET ${updates.join(', ')} WHERE id = ?`).bind(...binds).run();
+      await recordAuditLog(env, sessionId, 'PROJECT_UPDATED', `Updated project "${project.name}"`, project.id);
+
+      return json({ ok: true, updated: true });
+    }
+
+    // --- Secrets Management ---
+    const secretsMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/secrets$/);
+    if (secretsMatch) {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, secretsMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+
+      if (request.method === 'GET') {
+        const secrets = await env.DB.prepare('SELECT id, key, created_at, updated_at FROM project_secrets WHERE project_id = ? ORDER BY key').bind(project.id).all();
+        return json({ secrets: secrets.results });
+      }
+
+      if (request.method === 'POST') {
+        const body = await request.json<{ key?: string; value?: string }>();
+        if (!body.key?.trim() || !body.value?.trim()) return json({ error: 'key and value are required' }, { status: 400 });
+        const now = new Date().toISOString();
+        const ciphertext = await encrypt(body.value.trim(), env.TOKEN_ENCRYPTION_KEY);
+        await env.DB.prepare(`INSERT INTO project_secrets (id, project_id, key, value_ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, key) DO UPDATE SET value_ciphertext = excluded.value_ciphertext, updated_at = excluded.updated_at`)
+          .bind(crypto.randomUUID(), project.id, body.key.trim(), ciphertext, now, now).run();
+        await recordAuditLog(env, sessionId, 'SECRET_CREATED', `Created secret "${body.key}" for ${project.name}`, project.id);
+        return json({ ok: true });
+      }
+
+      return json({ error: 'Method not allowed' }, { status: 405 });
+    }
+
+    const secretDeleteMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/secrets\/([a-zA-Z0-9_-]{1,128})$/);
+    if (secretDeleteMatch && request.method === 'DELETE') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, secretDeleteMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+
+      await env.DB.prepare('DELETE FROM project_secrets WHERE project_id = ? AND key = ?').bind(project.id, secretDeleteMatch[2]).run();
+      await recordAuditLog(env, sessionId, 'SECRET_DELETED', `Deleted secret "${secretDeleteMatch[2]}" for ${project.name}`, project.id);
+      return json({ ok: true });
+    }
+
+    // --- Deployment History & Rollback ---
+    const deploymentsMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/deployments$/);
+    if (deploymentsMatch && request.method === 'GET') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, deploymentsMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+
+      const deployments = await env.DB.prepare('SELECT * FROM project_deployments WHERE project_id = ? ORDER BY version DESC').bind(project.id).all();
+      return json({ deployments: deployments.results || [] });
+    }
+
+    const rollbackMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/rollback\/(\d+)$/);
+    if (rollbackMatch && request.method === 'POST') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, rollbackMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+
+      const targetVersion = parseInt(rollbackMatch[2], 10);
+      const targetDeployment = await env.DB.prepare('SELECT * FROM project_deployments WHERE project_id = ? AND version = ?').bind(project.id, targetVersion).first<any>();
+      if (!targetDeployment) return json({ error: 'Deployment version not found' }, { status: 404 });
+
+      await recordAuditLog(env, sessionId, 'ROLLBACK_STARTED', `Rolling back ${project.name} to version ${targetVersion}`, project.id);
+      await env.BUILD_JOBS.send({ projectId: project.id, prompt: project.prompt, resumeFrom: 'scaffolding', rollbackToVersion: targetVersion });
+      return json({ status: 'scaffolding', rollbackVersion: targetVersion }, { status: 202 });
+    }
+
+    // --- Duplicate / Fork Project ---
+    const duplicateMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/duplicate$/);
+    if (duplicateMatch && request.method === 'POST') {
+      if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
+      const project = await projectForOwner(env, duplicateMatch[1], sessionId);
+      if (!project) return json({ error: 'Project not found' }, { status: 404 });
+
+      const body = await request.json<{ name?: string; prompt?: string }>().catch(() => ({}));
+      const newName = body.name?.trim() || `${project.name} (copy)`;
+      const newPrompt = body.prompt?.trim() || project.prompt;
+
+      const newId = crypto.randomUUID();
+      const now = new Date().toISOString();
+      const providers = await connectionProviders(env, sessionId);
+      const canBuild = providers.has('github') && providers.has('cloudflare');
+      const status = canBuild ? 'planning' : 'needs_connections';
+
+      await env.DB.prepare('INSERT INTO projects (id, owner_id, name, prompt, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .bind(newId, sessionId, newName.slice(0, 80), newPrompt.slice(0, 4000), status, now, now).run();
+      await env.DB.batch(['workers', 'd1', 'r2', 'queues', 'rbac', 'audit_log'].map((feature) => env.DB.prepare('INSERT INTO project_features (project_id, feature, enabled, updated_at) VALUES (?, ?, 1, ?)').bind(newId, feature, now)));
+
+      // Copy secrets if any
+      const secrets = await env.DB.prepare('SELECT key, value_ciphertext FROM project_secrets WHERE project_id = ?').bind(project.id).all();
+      if (secrets.results?.length) {
+        await env.DB.batch(secrets.results.map(s => env.DB.prepare('INSERT INTO project_secrets (id, project_id, key, value_ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .bind(crypto.randomUUID(), newId, s.key, s.value_ciphertext, now, now)));
+      }
+
+      await recordAuditLog(env, sessionId, 'PROJECT_DUPLICATED', `Duplicated "${project.name}" as "${newName}"`, newId);
+
+      if (canBuild) {
+        await env.BUILD_JOBS.send({ projectId: newId, prompt: newPrompt });
+        await env.BUILDS.getByName(newId).plan(newId, newPrompt);
+      }
+      return json({ project: await projectForOwner(env, newId, sessionId) }, { status: 201 });
+    }
+
     const codeMatch = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/code$/);
     if (codeMatch) {
       if (!sessionId) return json({ error: 'Start a workspace first.' }, { status: 401 });
@@ -1837,6 +2351,7 @@ const workerHandler = {
           try { existing = JSON.parse(project.scaffolding_json); } catch {}
         }
         const updated = { ...existing, ...body };
+        if (updated.backend) updated.backend = sanitizeWorkerSource(project.name, project.prompt, updated.backend);
         await env.DB.prepare('UPDATE projects SET scaffolding_json = ?, updated_at = ? WHERE id = ?')
           .bind(JSON.stringify(updated), new Date().toISOString(), project.id).run();
         
