@@ -3,6 +3,7 @@ import worker, { BuildCoordinator } from './index';
 export { BuildCoordinator };
 
 type RuntimeEnv = Record<string, unknown> & {
+  DB?: D1Database;
   SESSION_SECRET?: string;
   TOKEN_ENCRYPTION_KEY?: string | CryptoKey;
 };
@@ -15,8 +16,35 @@ function base64Url(bytes: Uint8Array): string {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
+function normalizeD1(db: D1Database): D1Database {
+  return new Proxy(db, {
+    get(target, property, receiver) {
+      if (property === 'prepare') {
+        return (query: string) => {
+          const statement = target.prepare(query);
+          return new Proxy(statement, {
+            get(statementTarget, statementProperty, statementReceiver) {
+              if (statementProperty === 'bind') {
+                return (...values: unknown[]) => statementTarget.bind(...values.map((value) => value === undefined ? null : value));
+              }
+              const value = Reflect.get(statementTarget, statementProperty, statementReceiver);
+              return typeof value === 'function' ? value.bind(statementTarget) : value;
+            },
+          });
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as D1Database;
+}
+
 async function normalizeRuntimeEnv<T extends RuntimeEnv>(env: T): Promise<T> {
   const normalized = { ...env } as T;
+
+  if (env.DB) {
+    normalized.DB = normalizeD1(env.DB) as T['DB'];
+  }
 
   if (typeof env.SESSION_SECRET === 'string') {
     const digest = await crypto.subtle.digest('SHA-256', encoder.encode(env.SESSION_SECRET));

@@ -108,6 +108,9 @@ jobs:
 
       - name: Runtime smoke test
         shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           BASE='https://vela-control-plane.averymiddlebrook2014.workers.dev'
@@ -143,7 +146,11 @@ jobs:
           request session /tmp/vela-session.json -c /tmp/vela.cookies -X POST "$BASE/session"
           request connections /tmp/vela-connections.json -b /tmp/vela.cookies "$BASE/connections"
           request projects /tmp/vela-projects.json -b /tmp/vela.cookies "$BASE/projects"
+          request create-project /tmp/vela-create.json -b /tmp/vela.cookies -X POST -H 'content-type: application/json' -d '{"name":"CI Smoke Test","prompt":"Build a minimal calculator smoke-test app"}' "$BASE/projects"
 
           node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-connections.json','utf8'));if(!Array.isArray(x.connections))throw new Error('connections payload invalid')"
           node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-projects.json','utf8'));if(!Array.isArray(x.projects))throw new Error('projects payload invalid')"
-          echo 'Runtime smoke test passed.'
+          SMOKE_ID="$(node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-create.json','utf8'));const id=x.project?.id;if(!/^[0-9a-f-]{36}$/.test(id||''))throw new Error('created project payload invalid');process.stdout.write(id)")"
+
+          npx --yes wrangler@4.126.0 d1 execute vela-control-plane --remote --yes --command "DELETE FROM build_events WHERE project_id = '$SMOKE_ID'; DELETE FROM project_features WHERE project_id = '$SMOKE_ID'; DELETE FROM usage_events WHERE project_id = '$SMOKE_ID'; DELETE FROM projects WHERE id = '$SMOKE_ID';"
+          echo 'Runtime smoke test passed, including project creation.'
