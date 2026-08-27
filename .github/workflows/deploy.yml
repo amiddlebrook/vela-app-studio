@@ -98,12 +98,13 @@ jobs:
           $WRANGLER d1 execute "$DB" --remote --yes --command "INSERT OR IGNORE INTO d1_migrations(name) VALUES ('0001_control_plane.sql'), ('0002_oauth_connections.sql'), ('0003_build_events.sql'), ('0004_users.sql'), ('0005_scaffolding.sql'), ('0007_plan_json.sql'), ('0008_build_event_stage.sql');"
 
       - name: Deploy Worker
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: "4.126.0"
-          command: deploy
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@4.126.0 deploy
 
       - name: Runtime smoke test
         shell: bash
