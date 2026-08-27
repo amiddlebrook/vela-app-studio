@@ -390,7 +390,7 @@ async function deployStandaloneWorker(token: string, accountId: string, workerNa
   const subdomainResponse = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`,
     {
-      method: 'PUT',
+      method: 'POST',
       headers: {
         authorization: `Bearer ${token}`,
         'content-type': 'application/json',
