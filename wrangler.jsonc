@@ -7,10 +7,11 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "APP_ORIGIN": "https://vela-control-plane.averymiddlebrook2014.workers.dev",
-    "CLOUDFLARE_ACCOUNT_ID": "07f1b17fd676c14af148ff1d818383a9"
+    "CLOUDFLARE_ACCOUNT_ID": "07f1b17fd676c14af148ff1d818383a9",
+    "OPENROUTER_MODEL": "z-ai/glm-5.2:free"
   },
   "secrets": {
-    "required": ["SESSION_SECRET", "TOKEN_ENCRYPTION_KEY"]
+    "required": ["SESSION_SECRET", "TOKEN_ENCRYPTION_KEY", "OPENROUTER_API_KEY"]
   },
   "durable_objects": {
     "bindings": [{ "name": "BUILDS", "class_name": "BuildCoordinator" }]
