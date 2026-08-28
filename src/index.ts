@@ -131,13 +131,22 @@ function messageFromError(error: unknown): string {
 function cleanCodeBlock(code: string): string {
   if (!code) return '';
   let cleaned = code.trim();
-  cleaned = cleaned.replace(/^```[a-zA-Z0-9_-]*\r?\n?/, '');
-  cleaned = cleaned.replace(/\r?\n?```\s*$/, '');
+  // Models occasionally ignore the requested output format and emit nested or
+  // mid-response Markdown fences. A fence is not valid JavaScript (Cloudflare
+  // reports its language tag as an unexpected identifier), so remove every
+  // standalone fence rather than only an outer pair.
+  cleaned = cleaned.replace(/^\s*```[a-zA-Z0-9_-]*\s*$/gm, '');
   return cleaned.trim();
 }
 
 function sanitizeWorkerSource(name: string, prompt: string, source: string): string {
-  let cleaned = cleanCodeBlock(source);
+  // Prefer the fenced block containing the worker when the model adds prose
+  // around its answer. Without this extraction, text such as "Here is the
+  // worker" would be uploaded as JavaScript even though the response contains
+  // an otherwise valid module.
+  const fencedBlocks = Array.from(source.matchAll(/```[a-zA-Z0-9_-]*\s*\r?\n([\s\S]*?)```/g), match => match[1]);
+  const fencedWorker = fencedBlocks.find(block => block.includes('export default'));
+  let cleaned = cleanCodeBlock(fencedWorker ?? source);
   if (!cleaned || !cleaned.includes('export default')) {
     cleaned = generateEnterpriseScaffoldFallback(name, prompt).backend;
   }
