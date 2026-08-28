@@ -142,6 +142,12 @@ function sanitizeWorkerSource(name: string, prompt: string, source: string): str
     cleaned = generateEnterpriseScaffoldFallback(name, prompt).backend;
   }
   cleaned = cleanCodeBlock(cleaned);
+  // Repair LLM regex patterns stripped by the backend template literal (\+ -> + etc)
+  cleaned = cleaned.replace(/\.replace\(\/\+\/g/g, '.replace(/[+]/g');
+  cleaned = cleaned.replace(/\.replace\(\/\.\/g/g, '.replace(/[.]/g');
+  cleaned = cleaned.replace(/\.replace\(\/\?\/g/g, '.replace(/[?]/g');
+  cleaned = cleaned.replace(/\.replace\(\/\\w\+\/g/g, '.replace(/[a-zA-Z0-9_]+/g');
+  cleaned = cleaned.replace(/\.replace\(\/\\s\+\/g/g, '.replace(/[\\s]+/g');
   return cleaned;
 }
 
