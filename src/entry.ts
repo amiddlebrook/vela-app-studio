@@ -1,3 +1,4 @@
+import { DurableObject } from 'cloudflare:workers';
 import worker, { BuildCoordinator } from './index';
 
 export { BuildCoordinator };
@@ -57,6 +58,47 @@ function normalizeD1(db: D1Database): D1Database {
   } as D1Database;
 }
 
+function repairGeneratedWorkerSource(source: string): string {
+  let repaired = source;
+
+  // Nested template literals in the deterministic scaffold used to turn the
+  // intended slash-regex replacement into `.replace(///g, '_')`. In JavaScript
+  // that starts a line comment, so Cloudflare reports a misleading syntax error
+  // at the next declaration (for example "Unexpected token 'const'"). Use
+  // replaceAll for slash normalization so the generated module cannot suffer
+  // from regex escaping damage.
+  repaired = repaired.replaceAll(".replace(///g, '_')", ".replaceAll('/', '_')");
+  repaired = repaired.replaceAll('.replace(///g, "_")', '.replaceAll("/", "_")');
+
+  return repaired;
+}
+
+async function repairCloudflareWorkerUpload(url: string, init?: RequestInit): Promise<RequestInit | undefined> {
+  if (
+    !url.includes('api.cloudflare.com/client/v4/accounts/') ||
+    !url.includes('/workers/scripts/') ||
+    init?.method?.toUpperCase() !== 'PUT' ||
+    !(init.body instanceof FormData)
+  ) {
+    return init;
+  }
+
+  const module = init.body.get('worker.mjs');
+  if (!(module instanceof Blob)) return init;
+
+  const source = await module.text();
+  const repaired = repairGeneratedWorkerSource(source);
+  if (repaired === source) return init;
+
+  init.body.set(
+    'worker.mjs',
+    new Blob([repaired], { type: 'application/javascript+module' }),
+    'worker.mjs',
+  );
+  console.warn(JSON.stringify({ event: 'worker_source_repaired_before_upload', repair: 'slash-regex' }));
+  return init;
+}
+
 function installOpenRouterFallback(): void {
   if (fetchFallbackInstalled) return;
   fetchFallbackInstalled = true;
@@ -67,6 +109,9 @@ function installOpenRouterFallback(): void {
       : input instanceof URL
         ? input.href
         : input.url;
+
+    const repairedInit = await repairCloudflareWorkerUpload(url, init);
+    if (repairedInit !== init) init = repairedInit;
 
     if (url !== 'https://openrouter.ai/api/v1/chat/completions') {
       return nativeFetch(input, init);
