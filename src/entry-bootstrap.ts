@@ -17,14 +17,46 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function githubLogin(headers: Headers): Promise<string | null> {
+  try {
+    const me = await nativeFetch('https://api.github.com/user', { headers });
+    if (!me.ok) return null;
+    const identity = await me.json() as { login?: string };
+    return identity.login?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function installGithubBootstrapGuard(): void {
   if (githubBootstrapInstalled) return;
   githubBootstrapInstalled = true;
 
   (globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = async (input, init) => {
-    const url = requestUrl(input);
+    let nextInput: RequestInfo | URL = input;
+    let url = requestUrl(nextInput);
     const method = init?.method?.toUpperCase() || (input instanceof Request ? input.method.toUpperCase() : 'GET');
     let nextInit = init;
+
+    // Stage 4 used the local repository slug after Stage 3 created the repo,
+    // producing /repos/<repo>/contents/... instead of
+    // /repos/<owner>/<repo>/contents/... and therefore a guaranteed GitHub 404.
+    // Repair that stale-owner path at the transport boundary so both current
+    // failed projects and future retries are idempotent.
+    if (url.startsWith('https://api.github.com/') && method === 'PUT') {
+      const parsed = new URL(url);
+      const ownerless = parsed.pathname.match(/^\/repos\/([^/]+)\/contents\/(.+)$/);
+      if (ownerless) {
+        const headers = new Headers(nextInit?.headers || (input instanceof Request ? input.headers : undefined));
+        const login = await githubLogin(headers);
+        if (login) {
+          parsed.pathname = `/repos/${encodeURIComponent(login)}/${encodeURIComponent(ownerless[1])}/contents/${ownerless[2]}`;
+          nextInput = parsed;
+          url = parsed.href;
+          console.warn(JSON.stringify({ event: 'github_ownerless_contents_path_repaired', repository: `${login}/${ownerless[1]}` }));
+        }
+      }
+    }
 
     if (
       url === 'https://api.github.com/user/repos' &&
@@ -38,11 +70,11 @@ function installGithubBootstrapGuard(): void {
       } catch {}
     }
 
-    let response = await nativeFetch(input, nextInit);
+    let response = await nativeFetch(nextInput, nextInit);
 
     // A failed build can leave the private repo created before Vela records it
     // in D1. Treat GitHub's "name already exists" response as an idempotent
-    // create by resolving the just-created repository and continuing the build.
+    // create by resolving the existing repository and continuing the build.
     if (
       url === 'https://api.github.com/user/repos' &&
       method === 'POST' &&
@@ -54,15 +86,12 @@ function installGithubBootstrapGuard(): void {
         const name = payload.name?.trim();
         if (name) {
           const headers = new Headers(nextInit.headers);
-          const me = await nativeFetch('https://api.github.com/user', { headers });
-          if (me.ok) {
-            const identity = await me.json() as { login?: string };
-            if (identity.login) {
-              const existing = await nativeFetch(`https://api.github.com/repos/${encodeURIComponent(identity.login)}/${encodeURIComponent(name)}`, { headers });
-              if (existing.ok) {
-                console.warn(JSON.stringify({ event: 'github_repository_create_recovered', repository: `${identity.login}/${name}` }));
-                return existing;
-              }
+          const login = await githubLogin(headers);
+          if (login) {
+            const existing = await nativeFetch(`https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(name)}`, { headers });
+            if (existing.ok) {
+              console.warn(JSON.stringify({ event: 'github_repository_create_recovered', repository: `${login}/${name}` }));
+              return existing;
             }
           }
         }
@@ -70,7 +99,8 @@ function installGithubBootstrapGuard(): void {
     }
 
     // GitHub can briefly return 404 immediately after repository creation.
-    // Retry content writes so repo propagation never turns into a failed build.
+    // Retry fully-qualified content writes so propagation never becomes a build
+    // failure after the repository already exists.
     if (
       response.status === 404 &&
       method === 'PUT' &&
@@ -78,7 +108,7 @@ function installGithubBootstrapGuard(): void {
     ) {
       for (const waitMs of [150, 350, 750]) {
         await delay(waitMs);
-        response = await nativeFetch(input, nextInit);
+        response = await nativeFetch(nextInput, nextInit);
         if (response.status !== 404) break;
       }
     }
