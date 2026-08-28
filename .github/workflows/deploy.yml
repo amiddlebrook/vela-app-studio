@@ -47,12 +47,10 @@ jobs:
             echo 'TOKEN_ENCRYPTION_KEY already configured.'
           fi
 
-          # The browser connection uses Cloudflare OAuth for account identity,
-          # but some Workers management endpoints (especially script subdomain
-          # enablement) reject OAuth access tokens. The same API token already
-          # used by this workflow to deploy Vela is installed into the runtime so
-          # generated apps can provision D1, upload Workers, and enable their
-          # workers.dev routes without a second user credential.
+          # Cloudflare OAuth is retained for user/account identity, but several
+          # Worker-management endpoints do not accept OAuth access tokens. The
+          # API token already used by this deployment is therefore synchronized
+          # into the Worker runtime for generated-app provisioning operations.
           if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
             PAYLOAD="$(jq -c --arg value "$CLOUDFLARE_API_TOKEN" '. + {CLOUDFLARE_API_TOKEN:$value}' <<<"$PAYLOAD")"
             echo 'Synchronizing CLOUDFLARE_API_TOKEN into Worker runtime secrets.'
@@ -137,6 +135,28 @@ jobs:
         run: |
           set -euo pipefail
           npx --yes wrangler@4.126.0 deploy
+
+      - name: Repair generated workers.dev routes
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
+          scripts="$(curl -fsS "$API/scripts" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result[]?.id | select(startswith("vela-") and . != "vela-control-plane")')"
+          if [ -z "$scripts" ]; then
+            echo 'No generated Vela Workers require workers.dev route reconciliation.'
+          else
+            while IFS= read -r script; do
+              [ -n "$script" ] || continue
+              echo "Ensuring workers.dev route is enabled for $script"
+              curl -fsS -X POST "$API/scripts/$script/subdomain" \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H 'content-type: application/json' \
+                --data '{"enabled":true,"previews_enabled":true}' >/dev/null
+            done <<<"$scripts"
+          fi
 
       - name: Runtime smoke test
         shell: bash
