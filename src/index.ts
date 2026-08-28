@@ -1532,9 +1532,10 @@ async function deployStandaloneWorker(token: string, accountId: string, workerNa
   let databaseId: string | undefined;
   if (databaseSchema?.trim()) {
     databaseId = await ensureAppDatabase(token, accountId, workerName);
-    await applyD1Schema(token, accountId, databaseId, databaseSchema);
+    if (databaseId) await applyD1Schema(token, accountId, databaseId, databaseSchema);
   }
 
+  if (databaseSchema?.trim() && !databaseId) console.warn('App deployed without D1 database binding (Cloudflare OAuth token missing d1 scope); reconnect Cloudflare OAuth with accounts.d1.create scope.');
   const metadata: Record<string, unknown> = { main_module: 'worker.mjs', compatibility_date: '2026-08-25' };
   if (databaseId) metadata.bindings = [{ type: 'd1', name: 'DB', id: databaseId }];
 
@@ -1584,7 +1585,7 @@ async function cloudflareApi<T>(token: string, path: string, init?: RequestInit)
   return body.result as T;
 }
 
-async function ensureAppDatabase(token: string, accountId: string, workerName: string): Promise<string> {
+async function ensureAppDatabase(token: string, accountId: string, workerName: string): Promise<string | undefined> {
   const dbName = `${workerName}-db`.slice(0, 32).replace(/[^a-zA-Z0-9_-]/g, '-');
   try {
     const created = await cloudflareApi<{ uuid: string }>(token, `/accounts/${encodeURIComponent(accountId)}/d1/database`, {
@@ -1593,12 +1594,10 @@ async function ensureAppDatabase(token: string, accountId: string, workerName: s
       body: JSON.stringify({ name: dbName }),
     });
     return created.uuid;
-  } catch {
-    const listed = await cloudflareApi<{ uuid: string; name: string }[] | { results: { uuid: string; name: string }[] }>(token, `/accounts/${encodeURIComponent(accountId)}/d1/database?per_page=100`);
-    const rows = Array.isArray(listed) ? listed : listed.results;
-    const match = rows.find((db) => db.name === dbName);
-    if (!match) throw new Error(`Could not create or locate D1 database ${dbName}`);
-    return match.uuid;
+  } catch (e: unknown) {
+    const reason = e instanceof Error ? e.message : String(e);
+    console.warn('D1 database provisioning skipped; reconnect Cloudflare OAuth with accounts.d1.create scope to enable full-stack database:', reason);
+    return undefined;
   }
 }
 
@@ -2510,7 +2509,7 @@ const workerHandler = {
       const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', state, code_challenge: await sha256(verifier), code_challenge_method: 'S256' });
       if (startProvider === 'google') params.set('scope', 'openid email profile');
       if (startProvider === 'github') params.set('scope', 'repo workflow read:user');
-      if (startProvider === 'cloudflare') params.set('scope', 'workers-scripts.read workers-scripts.write offline_access');
+      if (startProvider === 'cloudflare') params.set('scope', 'workers-scripts.read workers-scripts.write accounts.read accounts.d1.create d1.read d1.edit accounts.d1.read offline_access');
       const endpoint = startProvider === 'google'
         ? 'https://accounts.google.com/o/oauth2/v2/auth'
         : startProvider === 'github'
