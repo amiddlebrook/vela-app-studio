@@ -8,6 +8,7 @@
   "vars": {
     "APP_ORIGIN": "https://vela-control-plane.averymiddlebrook2014.workers.dev",
     "CLOUDFLARE_ACCOUNT_ID": "07f1b17fd676c14af148ff1d818383a9",
+    "WORKERS_DEV_SUBDOMAIN": "averymiddlebrook2014",
     "OPENROUTER_MODEL": "z-ai/glm-5.2:free",
     "CLOUDFLARE_AI_MODEL": "@cf/meta/llama-3.1-8b-instruct-fast"
   },
