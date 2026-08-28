@@ -1526,10 +1526,20 @@ async function putGithubFile(token: string, repository: string, path: string, co
   });
 }
 
-async function deployStandaloneWorker(token: string, accountId: string, workerName: string, source: string): Promise<void> {
+async function deployStandaloneWorker(token: string, accountId: string, workerName: string, source: string, databaseSchema?: string): Promise<{ verified: boolean; workerUrl: string; reason?: string }> {
   const cleanSource = sanitizeWorkerSource(workerName, 'Standalone App', source);
+
+  let databaseId: string | undefined;
+  if (databaseSchema?.trim()) {
+    databaseId = await ensureAppDatabase(token, accountId, workerName);
+    await applyD1Schema(token, accountId, databaseId, databaseSchema);
+  }
+
+  const metadata: Record<string, unknown> = { main_module: 'worker.mjs', compatibility_date: '2026-08-25' };
+  if (databaseId) metadata.bindings = [{ type: 'd1', name: 'DB', id: databaseId }];
+
   const form = new FormData();
-  form.set('metadata', JSON.stringify({ main_module: 'worker.mjs', compatibility_date: '2026-08-25' }));
+  form.set('metadata', JSON.stringify(metadata));
   form.set('worker.mjs', new Blob([cleanSource], { type: 'application/javascript+module' }), 'worker.mjs');
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(workerName)}`, {
     method: 'PUT',
@@ -1555,6 +1565,70 @@ async function deployStandaloneWorker(token: string, accountId: string, workerNa
     const detail = (await subdomainResponse.text()).replace(/\s+/g, ' ').slice(0, 350);
     console.warn(`Cloudflare subdomain enable warning (${subdomainResponse.status}): ${detail}`);
   }
+
+  const workerUrl = `https://${workerName}.workers.dev`;
+  const verified = await verifyWorkerLive(workerUrl);
+  return { verified, workerUrl, reason: verified ? undefined : 'worker never served a healthy response at / after deployment' };
+}
+
+async function cloudflareApi<T>(token: string, path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
+    ...init,
+    headers: { authorization: `Bearer ${token}`, ...(init?.headers || {}) },
+  });
+  const body = await response.json().catch(() => null) as { success?: boolean; result?: T; errors?: { code: number; message: string }[] } | null;
+  if (!response.ok || !body?.success) {
+    const detail = (body?.errors || []).map((e) => e.message).join('; ') || `HTTP ${response.status}`;
+    throw new Error(`Cloudflare API ${path} failed: ${detail}`);
+  }
+  return body.result as T;
+}
+
+async function ensureAppDatabase(token: string, accountId: string, workerName: string): Promise<string> {
+  const dbName = `${workerName}-db`.slice(0, 32).replace(/[^a-zA-Z0-9_-]/g, '-');
+  try {
+    const created = await cloudflareApi<{ uuid: string }>(token, `/accounts/${encodeURIComponent(accountId)}/d1/database`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: dbName }),
+    });
+    return created.uuid;
+  } catch {
+    const listed = await cloudflareApi<{ uuid: string; name: string }[] | { results: { uuid: string; name: string }[] }>(token, `/accounts/${encodeURIComponent(accountId)}/d1/database?per_page=100`);
+    const rows = Array.isArray(listed) ? listed : listed.results;
+    const match = rows.find((db) => db.name === dbName);
+    if (!match) throw new Error(`Could not create or locate D1 database ${dbName}`);
+    return match.uuid;
+  }
+}
+
+async function applyD1Schema(token: string, accountId: string, databaseId: string, schema: string): Promise<void> {
+  if (!schema?.trim()) return;
+  try {
+    const form = new FormData();
+    form.set('sql', new Blob([schema], { type: 'application/sql' }), 'schema.sql');
+    await cloudflareApi(token, `/accounts/${encodeURIComponent(accountId)}/d1/database/${encodeURIComponent(databaseId)}/import`, { method: 'POST', body: form });
+  } catch {
+    const statements = schema.split(/;\s*\n/).map((statement) => statement.trim()).filter(Boolean);
+    for (const statement of statements) {
+      await cloudflareApi(token, `/accounts/${encodeURIComponent(accountId)}/d1/database/${encodeURIComponent(databaseId)}/query`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sql: statement }),
+      }).catch(() => {});
+    }
+  }
+}
+
+async function verifyWorkerLive(workerUrl: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const response = await fetch(workerUrl, { redirect: 'manual' });
+      if (response.status >= 200 && response.status < 400) return true;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return false;
 }
 
 function securityHeaders(headers = new Headers()): Headers {
@@ -1826,8 +1900,20 @@ export async function buildStandaloneApp(env: Env, projectId: string, resumeFrom
   if (!shouldSkip('deploying_worker')) {
     await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('deploying_worker', new Date().toISOString(), project.id).run();
     await recordEvent(env, projectId, 'deployment_started', `Deploying edge worker ${workerName} to Cloudflare`, 'deploying_worker');
-    await deployStandaloneWorker(cloudflare.accessToken, env.CLOUDFLARE_ACCOUNT_ID, workerName, source);
-    await recordEvent(env, projectId, 'deployment_complete', `Worker ${workerName} uploaded and *.workers.dev subdomain enabled`, 'deploying_worker');
+    let deployment = await deployStandaloneWorker(cloudflare.accessToken, env.CLOUDFLARE_ACCOUNT_ID, workerName, source, scaffolding.database);
+    if (!deployment.verified) {
+      await recordEvent(env, projectId, 'deployment_fallback', 'Generated worker failed live verification; deploying the proven enterprise scaffold instead', 'deploying_worker');
+      const fallback = generateEnterpriseScaffoldFallback(project.name, project.prompt);
+      deployment = await deployStandaloneWorker(cloudflare.accessToken, env.CLOUDFLARE_ACCOUNT_ID, workerName, fallback.backend, fallback.database);
+      scaffolding = fallback;
+      await env.DB.prepare('UPDATE projects SET scaffolding_json = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(fallback), new Date().toISOString(), project.id).run();
+      await putGithubFile(github.accessToken, project.github_repository || repositoryName, 'src/worker.mjs', fallback.backend, 'Replace worker with verified enterprise scaffold');
+      await putGithubFile(github.accessToken, project.github_repository || repositoryName, 'schema.sql', fallback.database, 'Replace schema with verified enterprise scaffold');
+    }
+    if (!deployment.verified) {
+      throw new Error(`Deployed worker failed live verification (${deployment.workerUrl}): ${deployment.reason}`);
+    }
+    await recordEvent(env, projectId, 'deployment_complete', `Worker ${workerName} verified live at ${deployment.workerUrl}`, 'deploying_worker');
   }
 
   // --- Live Status & Deployment Record ---
