@@ -109,7 +109,11 @@ jobs:
           ensure_column projects scaffolding_json "TEXT"
           ensure_column projects plan_json "TEXT"
 
-          $WRANGLER d1 execute "$DB" --remote --yes --command "INSERT OR IGNORE INTO d1_migrations(name) VALUES ('0001_control_plane.sql'), ('0002_oauth_connections.sql'), ('0003_build_events.sql'), ('0004_users.sql'), ('0005_scaffolding.sql'), ('0007_plan_json.sql'), ('0008_build_event_stage.sql');"
+          # Idempotent migration files that were previously only marked as applied.
+          $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0008_enterprise_schema.sql
+          $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0009_workspace_settings.sql
+
+          $WRANGLER d1 execute "$DB" --remote --yes --command "INSERT OR IGNORE INTO d1_migrations(name) VALUES ('0001_control_plane.sql'), ('0002_oauth_connections.sql'), ('0003_build_events.sql'), ('0004_users.sql'), ('0005_scaffolding.sql'), ('0006_build_events_stage.sql'), ('0007_plan_json.sql'), ('0008_enterprise_schema.sql'), ('0009_workspace_settings.sql');"
 
       - name: Deploy Worker
         shell: bash
