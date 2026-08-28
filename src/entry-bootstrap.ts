@@ -2,15 +2,9 @@ import { BuildCoordinator } from './index';
 
 export { BuildCoordinator };
 
-type BootstrapEnv = {
-  APP_ORIGIN?: string;
-  WORKERS_DEV_SUBDOMAIN?: string;
-  DB?: D1Database;
-};
-
 const nativeFetch = globalThis.fetch.bind(globalThis);
 let githubBootstrapInstalled = false;
-let workersDevSuffix: string | null = null;
+let currentCloudflareApiToken: string | undefined;
 
 function requestUrl(input: RequestInfo | URL): string {
   return typeof input === 'string'
@@ -24,83 +18,9 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function configureWorkersDevSuffix(env: unknown): void {
-  const runtime = (env || {}) as BootstrapEnv;
-  const explicit = runtime.WORKERS_DEV_SUBDOMAIN?.trim();
-  if (explicit) {
-    workersDevSuffix = explicit.endsWith('.workers.dev') ? explicit : `${explicit}.workers.dev`;
-    return;
-  }
-
-  if (!runtime.APP_ORIGIN) return;
-  try {
-    const host = new URL(runtime.APP_ORIGIN).hostname;
-    const parts = host.split('.');
-    if (host.endsWith('.workers.dev') && parts.length >= 4) {
-      workersDevSuffix = parts.slice(1).join('.');
-    }
-  } catch {}
-}
-
-function correctWorkersDevUrl(value: string): string {
-  if (!workersDevSuffix) return value;
-  try {
-    const parsed = new URL(value);
-    const parts = parsed.hostname.split('.');
-    if (parts.length === 3 && parts[1] === 'workers' && parts[2] === 'dev') {
-      parsed.hostname = `${parts[0]}.${workersDevSuffix}`;
-      return parsed.href.replace(/\/$/, parsed.pathname === '/' && !parsed.search && !parsed.hash ? '' : '/');
-    }
-  } catch {}
-  return value;
-}
-
-function rewriteWorkerTarget(input: RequestInfo | URL): RequestInfo | URL {
-  if (!workersDevSuffix) return input;
-  const value = requestUrl(input);
-  const corrected = correctWorkersDevUrl(value);
-  if (corrected === value) return input;
-  console.warn(JSON.stringify({ event: 'workers_dev_account_subdomain_repaired', from: value, to: corrected }));
-  return new URL(corrected);
-}
-
-async function repairStoredWorkerUrls(env: unknown): Promise<void> {
-  const runtime = (env || {}) as BootstrapEnv;
-  if (!runtime.DB || !workersDevSuffix) return;
-
-  try {
-    const result = await runtime.DB.prepare(
-      'SELECT id, worker_url FROM project_deployments WHERE worker_url IS NOT NULL ORDER BY created_at DESC LIMIT 100'
-    ).all();
-    const rows = (result.results || []) as Array<{ id?: string; worker_url?: string }>;
-    for (const row of rows) {
-      if (!row.id || !row.worker_url) continue;
-      const corrected = correctWorkersDevUrl(row.worker_url);
-      if (corrected !== row.worker_url) {
-        await runtime.DB.prepare('UPDATE project_deployments SET worker_url = ? WHERE id = ?')
-          .bind(corrected, row.id)
-          .run();
-      }
-    }
-  } catch (error) {
-    console.warn(JSON.stringify({ event: 'stored_worker_url_repair_failed', reason: error instanceof Error ? error.message : String(error) }));
-  }
-}
-
-async function repairProjectResponse(request: Request, response: Response): Promise<Response> {
-  if (!workersDevSuffix || !response.headers.get('content-type')?.includes('application/json')) return response;
-  const pathname = new URL(request.url).pathname;
-  if (!pathname.startsWith('/projects')) return response;
-
-  try {
-    const accountLabel = workersDevSuffix.replace(/\.workers\.dev$/, '');
-    let text = await response.text();
-    text = text.replace(/https:\/\/([a-z0-9-]+)\.workers\.dev/gi, `https://$1.${workersDevSuffix}`);
-    text = text.replace(/"worker_name":"([a-z0-9-]+)"/gi, `"worker_name":"$1.${accountLabel}"`);
-    return new Response(text, { status: response.status, statusText: response.statusText, headers: response.headers });
-  } catch {
-    return response;
-  }
+function bindRuntimeCredentials(env: unknown): void {
+  const token = (env as { CLOUDFLARE_API_TOKEN?: unknown } | null)?.CLOUDFLARE_API_TOKEN;
+  currentCloudflareApiToken = typeof token === 'string' && token.trim() ? token.trim() : undefined;
 }
 
 async function githubLogin(headers: Headers): Promise<string | null> {
@@ -161,11 +81,29 @@ function installGithubBootstrapGuard(): void {
   githubBootstrapInstalled = true;
 
   (globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = async (input, init) => {
-    let nextInput: RequestInfo | URL = rewriteWorkerTarget(input);
+    let nextInput: RequestInfo | URL = input;
     let url = requestUrl(nextInput);
     const method = init?.method?.toUpperCase() || (input instanceof Request ? input.method.toUpperCase() : 'GET');
     let nextInit = init;
 
+    // The OAuth connection identifies the user's Cloudflare account, but several
+    // Worker management endpoints (notably workers.dev subdomain management) do
+    // not accept Cloudflare OAuth access tokens. Vela's own deployment token is
+    // installed as a Worker secret by CI and has the same Workers Scripts/D1
+    // permissions used to deploy this control plane. Use it for account API
+    // resource operations so generated Workers can actually receive a public
+    // workers.dev route instead of being uploaded but left unreachable.
+    if (url.startsWith('https://api.cloudflare.com/client/v4/accounts/') && currentCloudflareApiToken) {
+      const headers = new Headers(nextInit?.headers || (input instanceof Request ? input.headers : undefined));
+      headers.set('authorization', `Bearer ${currentCloudflareApiToken}`);
+      nextInit = { ...nextInit, headers };
+    }
+
+    // Stage 4 used the local repository slug after Stage 3 created the repo,
+    // producing /repos/<repo>/contents/... instead of
+    // /repos/<owner>/<repo>/contents/... and therefore a guaranteed GitHub 404.
+    // Repair that stale-owner path at the transport boundary so both current
+    // failed projects and future retries are idempotent.
     if (url.startsWith('https://api.github.com/') && method === 'PUT') {
       const parsed = new URL(url);
       const ownerless = parsed.pathname.match(/^\/repos\/([^/]+)\/contents\/(.+)$/);
@@ -189,25 +127,15 @@ function installGithubBootstrapGuard(): void {
       try {
         const payload = JSON.parse(init.body) as Record<string, unknown>;
         payload.auto_init = true;
-        nextInit = { ...init, body: JSON.stringify(payload) };
+        nextInit = { ...nextInit, body: JSON.stringify(payload) };
       } catch {}
     }
 
     let response = await nativeFetch(nextInput, nextInit);
 
-    if (
-      workersDevSuffix &&
-      /^https:\/\/[^/.]+\.[^/.]+\.workers\.dev\/?$/.test(url) &&
-      method === 'GET' &&
-      response.status >= 400
-    ) {
-      for (const waitMs of [800, 1600, 2400]) {
-        await delay(waitMs);
-        response = await nativeFetch(nextInput, nextInit);
-        if (response.status >= 200 && response.status < 400) break;
-      }
-    }
-
+    // A failed build can leave the private repo created before Vela records it
+    // in D1. Treat GitHub's "name already exists" response as an idempotent
+    // create by resolving the existing repository and continuing the build.
     if (
       url === 'https://api.github.com/user/repos' &&
       method === 'POST' &&
@@ -231,10 +159,17 @@ function installGithubBootstrapGuard(): void {
       } catch {}
     }
 
+    // GitHub's contents API requires the current blob SHA whenever a PUT updates
+    // an existing path. Vela's optimistic GET can miss that SHA after a prior
+    // partial build or transient 404. Recover the current SHA and retry the same
+    // write instead of failing the entire build with HTTP 422.
     if (method === 'PUT' && response.status === 422 && isGithubContentsUrl(url)) {
       response = await retryGithubContentUpdateWithSha(nextInput, nextInit, response);
     }
 
+    // GitHub can briefly return 404 immediately after repository creation.
+    // Retry fully-qualified content writes so propagation never becomes a build
+    // failure after the repository already exists.
     if (
       response.status === 404 &&
       method === 'PUT' &&
@@ -253,20 +188,21 @@ function installGithubBootstrapGuard(): void {
 
 installGithubBootstrapGuard();
 
+// Import entry-safe only after installing the GitHub bootstrap guard. This makes
+// entry-safe capture this guarded fetch as its native transport, so its existing
+// Cloudflare/source-repair guards compose on top instead of replacing it.
 const entry = import('./entry-safe');
 
 export default {
   async fetch(request: Request, env: unknown): Promise<Response> {
-    configureWorkersDevSuffix(env);
+    bindRuntimeCredentials(env);
     const module = await entry;
-    const response = await module.default.fetch(request, env as never);
-    return repairProjectResponse(request, response);
+    return module.default.fetch(request, env as never);
   },
 
   async queue(batch: MessageBatch<unknown>, env: unknown): Promise<void> {
-    configureWorkersDevSuffix(env);
+    bindRuntimeCredentials(env);
     const module = await entry;
-    await module.default.queue(batch as never, env as never);
-    await repairStoredWorkerUrls(env);
+    return module.default.queue(batch as never, env as never);
   },
 };
