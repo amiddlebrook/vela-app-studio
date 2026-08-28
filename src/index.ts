@@ -147,7 +147,12 @@ function sanitizeWorkerSource(name: string, prompt: string, source: string): str
   const fencedBlocks = Array.from(source.matchAll(/```[a-zA-Z0-9_-]*\s*\r?\n([\s\S]*?)```/g), match => match[1]);
   const fencedWorker = fencedBlocks.find(block => block.includes('export default'));
   let cleaned = cleanCodeBlock(fencedWorker ?? source);
-  if (!cleaned || !cleaned.includes('export default')) {
+  const defaultExports = cleaned.match(/\bexport\s+default\b/g)?.length ?? 0;
+  // A Worker module can only have one default export. Some model responses
+  // concatenate two otherwise valid alternatives, which Cloudflare reports as
+  // "Identifier '.default' has already been declared". Prefer the known-good
+  // scaffold rather than uploading a module that cannot be parsed.
+  if (!cleaned || defaultExports !== 1) {
     cleaned = generateEnterpriseScaffoldFallback(name, prompt).backend;
   }
   cleaned = cleanCodeBlock(cleaned);
@@ -336,7 +341,7 @@ async function getWorkspaceSettings(env: Env, ownerId: string, decrypted = false
 
   const decryptKey = async (ciphertext?: string | null): Promise<string | undefined> => {
     if (!ciphertext) return undefined;
-    if (!decrypted) return 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢';
+    if (!decrypted) return '••••••••••••';
     try {
       return JSON.parse(await decrypt(ciphertext, env.TOKEN_ENCRYPTION_KEY)) as string;
     } catch {
@@ -366,7 +371,7 @@ async function saveWorkspaceSettings(env: Env, ownerId: string, settings: Partia
   const now = new Date().toISOString();
 
   const encryptKey = async (newVal?: string, oldCiphertext?: string): Promise<string | null> => {
-    if (!newVal || newVal.includes('â€¢â€¢â€¢â€¢')) return oldCiphertext || null;
+    if (!newVal || newVal.includes('••••')) return oldCiphertext || null;
     return await encrypt(newVal.trim(), env.TOKEN_ENCRYPTION_KEY);
   };
 
@@ -1189,7 +1194,7 @@ export default {
     <header class="flex flex-col md:flex-row md:items-center justify-between pb-8 border-b border-slate-800 gap-4">
       <div>
         <div class="inline-block px-2.5 py-1 text-xs font-semibold text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 rounded-full mb-3">
-          â— Live on Cloudflare Edge
+          ● Live on Cloudflare Edge
         </div>
         <h1 class="text-3xl md:text-5xl font-black tracking-tight text-white">\${APP_NAME}</h1>
         <p class="text-slate-400 text-sm md:text-base mt-1">\${APP_DESC}</p>
@@ -1274,7 +1279,7 @@ export default {
             <td class="p-4 font-semibold text-white">\${esc(i.title)}</td>
             <td class="p-4"><span class="px-2 py-0.5 text-xs rounded-md bg-slate-800 text-slate-300">\${esc(i.category)}</span></td>
             <td class="p-4"><span class="text-xs font-bold \${i.priority==='High'?'text-rose-400':i.priority==='Medium'?'text-amber-400':'text-slate-400'}">\${esc(i.priority)}</span></td>
-            <td class="p-4"><span class="text-xs text-emerald-400">â— \${esc(i.status)}</span></td>
+            <td class="p-4"><span class="text-xs text-emerald-400">● \${esc(i.status)}</span></td>
             <td class="p-4 text-right text-xs text-slate-500">\${new Date(i.updated_at).toLocaleTimeString()}</td>
           </tr>
         \`).join('');
@@ -1360,7 +1365,7 @@ export default function EnterpriseApp() {
       <div className="max-w-6xl mx-auto">
         <header className="flex justify-between items-center pb-6 border-b border-slate-800">
           <div>
-            <div className="text-xs font-bold text-emerald-400 mb-1 tracking-wider uppercase">â— Distributed Cloudflare App</div>
+            <div className="text-xs font-bold text-emerald-400 mb-1 tracking-wider uppercase">● Distributed Cloudflare App</div>
             <h1 className="text-3xl font-black">${appTitle}</h1>
             <p className="text-sm text-slate-400 mt-1">${desc}</p>
           </div>
@@ -1394,7 +1399,7 @@ export default function EnterpriseApp() {
               <div key={item.id} className="p-4 flex justify-between items-center hover:bg-slate-800/40 transition">
                 <div>
                   <div className="font-bold text-sm">{item.title}</div>
-                  <div className="text-xs text-slate-400 mt-0.5">{item.category} Â· {item.priority} priority</div>
+                  <div className="text-xs text-slate-400 mt-0.5">{item.category} · {item.priority} priority</div>
                 </div>
                 <div className="text-xs text-emerald-400 font-semibold">{item.status}</div>
               </div>
@@ -1726,7 +1731,7 @@ function successPage(provider: Provider, cookie?: string): Response {
   const label = provider === 'google' ? 'Google' : provider === 'github' ? 'GitHub' : 'Cloudflare';
   const headers = securityHeaders(new Headers({ 'content-type': 'text/html; charset=utf-8' }));
   if (cookie) headers.append('set-cookie', cookie);
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Connection complete</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#080a13;color:#f4f5ff;font:16px system-ui}main{max-width:500px;text-align:center;padding:40px;border:1px solid #283252;border-radius:24px;background:#111628}h1{font-size:28px;margin:0 0 12px;color:#9de8c5}p{color:#aab5d8;line-height:1.6}button{margin-top:20px;background:#8aa4ff;color:#090f23;border:0;border-radius:99px;padding:12px 24px;font-weight:700;cursor:pointer}</style></head><body><main><h1>${label} Connected</h1><p>Your authentication token is securely encrypted and stored on the control plane.</p><button onclick="window.location.href='/'">Return to Vela Studio â†’</button></main></body></html>`, { headers });
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Connection complete</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#080a13;color:#f4f5ff;font:16px system-ui}main{max-width:500px;text-align:center;padding:40px;border:1px solid #283252;border-radius:24px;background:#111628}h1{font-size:28px;margin:0 0 12px;color:#9de8c5}p{color:#aab5d8;line-height:1.6}button{margin-top:20px;background:#8aa4ff;color:#090f23;border:0;border-radius:99px;padding:12px 24px;font-weight:700;cursor:pointer}</style></head><body><main><h1>${label} Connected</h1><p>Your authentication token is securely encrypted and stored on the control plane.</p><button onclick="window.location.href='/'">Return to Vela Studio →</button></main></body></html>`, { headers });
 }
 
 async function connectionProviders(env: Env, ownerId: string): Promise<Set<string>> {
@@ -1850,7 +1855,7 @@ export async function buildStandaloneApp(env: Env, projectId: string, resumeFrom
     await recordEvent(env, projectId, 'plan_generated', `Architecture blueprint ready: ${plan.features.length} features, ${plan.techStack.length} tech modules`, 'planning');
     
     await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('awaiting_approval', new Date().toISOString(), projectId).run();
-    await recordEvent(env, projectId, 'awaiting_approval', 'Plan ready for review â€” awaiting your approval to generate full-stack code', 'awaiting_approval');
+    await recordEvent(env, projectId, 'awaiting_approval', 'Plan ready for review — awaiting your approval to generate full-stack code', 'awaiting_approval');
     return;
   } else {
     const existing = await env.DB.prepare('SELECT plan_json, scaffolding_json FROM projects WHERE id = ?').bind(projectId).first<{ plan_json: string | null; scaffolding_json: string | null }>();
@@ -1961,7 +1966,7 @@ function enterpriseDashboard(): Response {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Vela â€” Enterprise App Studio &amp; AI Toolbox</title>
+  <title>Vela — Enterprise App Studio &amp; AI Toolbox</title>
   <style>
     :root {
       --bg: #070913;
@@ -2113,17 +2118,17 @@ function enterpriseDashboard(): Response {
           <textarea id="proj-prompt" placeholder="Describe the application, target workflows, security requirements, and data model..."></textarea>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
             <span id="create-status" style="font-size:12px;color:var(--cyan)"></span>
-            <button class="primary" id="btn-create" onclick="createProject()">Architecture &amp; Plan â†’</button>
+            <button class="primary" id="btn-create" onclick="createProject()">Architecture &amp; Plan →</button>
           </div>
         </article>
 
         <article class="card">
           <h2>Enterprise Capabilities</h2>
           <div style="font-size:13px;line-height:1.7;color:var(--muted)">
-            <p>âœ¦ <b>Zero-Trust Security</b>: Pre-configured RBAC, Web Crypto token encryption &amp; OWASP headers.</p>
-            <p>âœ¦ <b>Edge Native</b>: Cloudflare Workers, D1 SQLite databases, and Queues.</p>
-            <p>âœ¦ <b>Full Source Ownership</b>: Standalone private GitHub repository per application.</p>
-            <p>âœ¦ <b>Manageable Toolbox</b>: Configure OpenRouter, Cloudflare Workers AI, OpenAI, Gemini, &amp; Anthropic.</p>
+            <p>✦ <b>Zero-Trust Security</b>: Pre-configured RBAC, Web Crypto token encryption &amp; OWASP headers.</p>
+            <p>✦ <b>Edge Native</b>: Cloudflare Workers, D1 SQLite databases, and Queues.</p>
+            <p>✦ <b>Full Source Ownership</b>: Standalone private GitHub repository per application.</p>
+            <p>✦ <b>Manageable Toolbox</b>: Configure OpenRouter, Cloudflare Workers AI, OpenAI, Gemini, &amp; Anthropic.</p>
           </div>
         </article>
       </div>
@@ -2131,7 +2136,7 @@ function enterpriseDashboard(): Response {
       <section>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
           <h2 style="font-size:20px;font-weight:800;">Your Applications &amp; Deployments</h2>
-          <button class="secondary" onclick="loadWorkspace()">âŸ³ Sync Workspace</button>
+          <button class="secondary" onclick="loadWorkspace()">⟳ Sync Workspace</button>
         </div>
         <div id="project-list">Loading workspace...</div>
       </section>
@@ -2146,7 +2151,7 @@ function enterpriseDashboard(): Response {
         <h3 style="font-size:16px;font-weight:700;margin-bottom:14px">Active Provider &amp; Routing</h3>
         <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">PRIMARY AI ROUTING</label>
         <select id="setting-provider">
-          <option value="auto">Auto (Failover: Custom â†’ OpenRouter â†’ Cloudflare AI â†’ OpenAI â†’ Gemini)</option>
+          <option value="auto">Auto (Failover: Custom → OpenRouter → Cloudflare AI → OpenAI → Gemini)</option>
           <option value="cloudflare">Cloudflare Workers AI (Edge Native)</option>
           <option value="openrouter">OpenRouter (Multi-Model Hub)</option>
           <option value="openai">OpenAI (GPT-4o / o3-mini)</option>
@@ -2181,7 +2186,7 @@ function enterpriseDashboard(): Response {
 
         <div style="display:flex;gap:10px;margin-top:20px">
           <button class="primary" onclick="saveSettings()">Save AI Toolbox Settings</button>
-          <button class="secondary" onclick="testAI()">Test Active Provider âš¡</button>
+          <button class="secondary" onclick="testAI()">Test Active Provider ⚡</button>
         </div>
         <div id="ai-test-result" style="font-size:12px;margin-top:12px"></div>
       </div>
@@ -2213,7 +2218,7 @@ function enterpriseDashboard(): Response {
     <div class="modal-box">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
         <h3 id="modal-title" style="font-size:18px;font-weight:800">Code Inspector</h3>
-        <button class="secondary" onclick="closeModal('inspector-modal')">âœ•</button>
+        <button class="secondary" onclick="closeModal('inspector-modal')">✕</button>
       </div>
       <div id="modal-content"></div>
     </div>
@@ -2285,32 +2290,32 @@ function enterpriseDashboard(): Response {
                 <h4>Architecture Blueprint: \${esc(plan.name || p.name)}</h4>
                 <p style="font-size:13px;color:var(--ink);margin-bottom:8px">\${esc(plan.description || p.prompt)}</p>
                 <div style="font-size:11px;font-weight:700;color:var(--muted);margin-top:10px">PLANNED FEATURES</div>
-                <div class="tag-cloud">\${(plan.features||[]).map(f => \`<span class="tag">âœ¦ \${esc(f)}</span>\`).join('')}</div>
+                <div class="tag-cloud">\${(plan.features||[]).map(f => \`<span class="tag">✦ \${esc(f)}</span>\`).join('')}</div>
                 <div style="font-size:11px;font-weight:700;color:var(--muted);margin-top:10px">TECH STACK</div>
-                <div class="tag-cloud">\${(plan.techStack||[]).map(t => \`<span class="tag">âš¡ \${esc(t)}</span>\`).join('')}</div>
+                <div class="tag-cloud">\${(plan.techStack||[]).map(t => \`<span class="tag">⚡ \${esc(t)}</span>\`).join('')}</div>
                 <div class="action-row" style="margin-top:16px">
-                  <button class="primary" onclick="approvePlan('\${p.id}')">âœ“ Approve &amp; Build Code</button>
-                  <button class="secondary" onclick="rejectPlan('\${p.id}')">âœ• Revise Plan</button>
+                  <button class="primary" onclick="approvePlan('\${p.id}')">✓ Approve &amp; Build Code</button>
+                  <button class="secondary" onclick="rejectPlan('\${p.id}')">✕ Revise Plan</button>
                 </div>
               </div>
             \`;
           } catch(e) {}
         }
 
-        const appUrl = p.worker_name && p.status === 'live' ? \`<a href="https://\${esc(p.worker_name)}.workers.dev" target="_blank" class="secondary" style="text-decoration:none;color:var(--cyan)">Open Live App â†—</a>\` : '';
-        const repoUrl = p.github_repository ? \`<a href="https://github.com/\${esc(p.github_repository)}" target="_blank" class="secondary" style="text-decoration:none">GitHub Repo â†—</a>\` : '';
+        const appUrl = p.worker_name && p.status === 'live' ? \`<a href="https://\${esc(p.worker_name)}.workers.dev" target="_blank" class="secondary" style="text-decoration:none;color:var(--cyan)">Open Live App ↗</a>\` : '';
+        const repoUrl = p.github_repository ? \`<a href="https://github.com/\${esc(p.github_repository)}" target="_blank" class="secondary" style="text-decoration:none">GitHub Repo ↗</a>\` : '';
         const codeBtn = p.scaffolding_json ? \`<button class="secondary" onclick="inspectCode('\${p.id}')">Inspect Code</button>\` : '';
         const retryBtn = p.status === 'failed' ? \`<button class="secondary" onclick="retryBuild('\${p.id}')">Retry Build</button>\` : '';
-        const deleteBtn = \`<button class="danger" onclick="deleteProject('\${p.id}', '\${esc(p.name)}')">Delete Build ðŸ—‘</button>\`;
+        const deleteBtn = \`<button class="danger" onclick="deleteProject('\${p.id}', '\${esc(p.name)}')">Delete Build 🗑</button>\`;
 
         return \`
           <article class="project-card">
             <div class="p-head">
               <div>
                 <h3>\${esc(p.name)}</h3>
-                <div style="font-size:11px;color:var(--muted);margin-top:3px">ID: \${p.id.slice(0,8)} Â· Updated \${new Date(p.updated_at).toLocaleTimeString()}</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:3px">ID: \${p.id.slice(0,8)} · Updated \${new Date(p.updated_at).toLocaleTimeString()}</div>
               </div>
-              <span class="badge \${p.status}">â— \${p.status.replace('_', ' ')}</span>
+              <span class="badge \${p.status}">● \${p.status.replace('_', ' ')}</span>
             </div>
             <p class="p-desc">\${esc(p.prompt)}</p>
             <div class="stage-track">\${dots}</div>
@@ -2443,10 +2448,10 @@ function enterpriseDashboard(): Response {
       resEl.style.color = 'var(--cyan)';
       try {
         const res = await api('/settings/test-llm', { method: 'POST' });
-        resEl.textContent = \`âœ“ Generation Successful in \${res.latency_ms}ms: "\${res.response}"\`;
+        resEl.textContent = \`✓ Generation Successful in \${res.latency_ms}ms: "\${res.response}"\`;
         resEl.style.color = 'var(--mint)';
       } catch (e) {
-        resEl.textContent = 'âœ• Test failed: ' + e.message;
+        resEl.textContent = '✕ Test failed: ' + e.message;
         resEl.style.color = 'var(--rose)';
       }
     }
@@ -2868,7 +2873,7 @@ const workerHandler = {
       
       const now = new Date().toISOString();
       await env.DB.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').bind('scaffolding', now, project.id).run();
-      await recordEvent(env, project.id, 'approved', 'Plan approved by user â€” generating full-stack code and deploying', 'scaffolding');
+      await recordEvent(env, project.id, 'approved', 'Plan approved by user — generating full-stack code and deploying', 'scaffolding');
       await recordAuditLog(env, sessionId, 'PLAN_APPROVED', `Approved architecture plan for ${project.name}`, project.id);
       
       await env.BUILD_JOBS.send({ projectId: project.id, prompt: project.prompt, resumeFrom: 'scaffolding' });
@@ -2887,7 +2892,7 @@ const workerHandler = {
       
       await env.DB.prepare('UPDATE projects SET prompt = ?, status = ?, updated_at = ? WHERE id = ?')
         .bind(newPrompt.slice(0, 4000), 'planning', now, project.id).run();
-      await recordEvent(env, project.id, 'rejected', 'Plan rejected / requirements revised â€” generating new architecture', 'planning');
+      await recordEvent(env, project.id, 'rejected', 'Plan rejected / requirements revised — generating new architecture', 'planning');
       await recordAuditLog(env, sessionId, 'PLAN_REVISED', `Revised prompt for ${project.name}`, project.id);
       
       await env.BUILD_JOBS.send({ projectId: project.id, prompt: newPrompt });
