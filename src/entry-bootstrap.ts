@@ -28,6 +28,48 @@ async function githubLogin(headers: Headers): Promise<string | null> {
   }
 }
 
+function isGithubContentsUrl(url: string): boolean {
+  return /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/contents\//.test(url);
+}
+
+async function retryGithubContentUpdateWithSha(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  response: Response,
+): Promise<Response> {
+  if (response.status !== 422 || !init || typeof init.body !== 'string') return response;
+
+  const url = requestUrl(input);
+  if (!isGithubContentsUrl(url)) return response;
+
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(init.body) as Record<string, unknown>;
+  } catch {
+    return response;
+  }
+
+  if (typeof payload.sha === 'string' && payload.sha.trim()) return response;
+
+  const detail = await response.clone().text().catch(() => '');
+  if (detail && !/sha|already exists|invalid request/i.test(detail)) return response;
+
+  const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+  const existing = await nativeFetch(url, { method: 'GET', headers });
+  if (!existing.ok) return response;
+
+  try {
+    const current = await existing.json() as { sha?: string };
+    if (!current.sha) return response;
+
+    payload.sha = current.sha;
+    console.warn(JSON.stringify({ event: 'github_contents_missing_sha_recovered', url }));
+    return nativeFetch(input, { ...init, body: JSON.stringify(payload) });
+  } catch {
+    return response;
+  }
+}
+
 function installGithubBootstrapGuard(): void {
   if (githubBootstrapInstalled) return;
   githubBootstrapInstalled = true;
@@ -98,13 +140,21 @@ function installGithubBootstrapGuard(): void {
       } catch {}
     }
 
+    // GitHub's contents API requires the current blob SHA whenever a PUT updates
+    // an existing path. Vela's optimistic GET can miss that SHA after a prior
+    // partial build or transient 404. Recover the current SHA and retry the same
+    // write instead of failing the entire build with HTTP 422.
+    if (method === 'PUT' && response.status === 422 && isGithubContentsUrl(url)) {
+      response = await retryGithubContentUpdateWithSha(nextInput, nextInit, response);
+    }
+
     // GitHub can briefly return 404 immediately after repository creation.
     // Retry fully-qualified content writes so propagation never becomes a build
     // failure after the repository already exists.
     if (
       response.status === 404 &&
       method === 'PUT' &&
-      /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/contents\//.test(url)
+      isGithubContentsUrl(url)
     ) {
       for (const waitMs of [150, 350, 750]) {
         await delay(waitMs);
