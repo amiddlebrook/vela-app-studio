@@ -858,15 +858,15 @@ async function signJWT(payload) {
   const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
   const body = btoa(JSON.stringify(payload)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(JWT_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  new TextEncoder().encode(header + '.' + body)
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(header + '.' + body));
   const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
-  return `\${header}.\${body}.\${sigB64}`;
+  return \`\${header}.\${body}.\${sigB64}\`;
 }
 
 async function verifyJWT(token) {
   const [header, body, sig] = token.split('.');
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(JWT_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
-  const valid = await crypto.subtle.verify('HMAC', key, Uint8Array.from(atob(sig.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)), new TextEncoder().encode(`\${header}.\${body}`));
+  const valid = await crypto.subtle.verify('HMAC', key, Uint8Array.from(atob(sig.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)), new TextEncoder().encode(\`\${header}.\${body}\`));
   if (!valid) return null;
   const payload = JSON.parse(atob(body.replace(/-/g, '+').replace(/_/g, '/')));
   if (payload.exp && payload.exp < Date.now() / 1000) return null;
@@ -897,7 +897,7 @@ function requireRole(user, ...allowedRoles) {
 // ---- Rate Limit Middleware ----
 async function rateLimitMiddleware(env, request, limit = 100) {
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
-  const rl = await checkRateLimit(env, `ip:${ip}`, limit);
+  const rl = await checkRateLimit(env, \`ip:\${ip}\`, limit);
   if (!rl.allowed) return jsonResponse({ error: 'Rate limit exceeded', retry_after: 60 }, 429);
   return null;
 }
@@ -944,10 +944,10 @@ async function handleWebSocket(request, env) {
   const payload = await verifyJWT(token);
   if (!payload) return jsonResponse({ error: 'Invalid token' }, 401);
   
-  const user = await getCurrentUser(env, new Request(request.url, { headers: { Authorization: `Bearer ${token}` } }));
+  const user = await getCurrentUser(env, new Request(request.url, { headers: { Authorization: \`Bearer \${token}\` } }));
   if (!user) return jsonResponse({ error: 'User not found' }, 404);
   
-  const doId = env.REALTIME.idFromName(`user:${user.id}`);
+  const doId = env.REALTIME.idFromName(\`user:\${user.id}\`);
   const stub = env.REALTIME.get(doId);
   return stub.fetch(request);
 }
@@ -1040,7 +1040,7 @@ export default {
 
       // ---- Auth: Register ----
       if (url.pathname === '/api/auth/register' && method === 'POST') {
-        const rl = await checkRateLimit(env, `auth:register:${request.headers.get('cf-connecting-ip') || 'unknown'}`, 10, 3600000);
+        const rl = await checkRateLimit(env, \`auth:register:\${request.headers.get('cf-connecting-ip') || 'unknown'}\`, 10, 3600000);
         if (!rl.allowed) return jsonResponse({ error: 'Too many registration attempts' }, 429);
         const body = await request.json();
         const { email, password, name } = body;
@@ -1057,13 +1057,13 @@ export default {
         const refreshHash = await hashPassword(refreshToken);
         await env.DB.prepare('INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)')
           .bind(crypto.randomUUID(), id, await hashPassword(refreshToken), new Date(Date.now() + 30 * 24 * 3600000).toISOString(), new Date().toISOString()).run();
-        await recordAuditLog(env, id, 'USER_REGISTERED', `User registered: ${email}`, null, request.headers.get('cf-connecting-ip') || 'edge');
+        await recordAuditLog(env, id, 'USER_REGISTERED', \`User registered: \${email}\`, null, request.headers.get('cf-connecting-ip') || 'edge');
         return jsonResponse({ access_token: accessToken, refresh_token: refreshToken, token_type: 'Bearer', expires_in: 3600 }, 201);
       }
 
       // ---- Auth: Login ----
       if (url.pathname === '/api/auth/login' && method === 'POST') {
-        const rl = await checkRateLimit(env, `auth:login:${request.headers.get('cf-connecting-ip') || 'unknown'}`, 20, 3600000);
+        const rl = await checkRateLimit(env, \`auth:login:\${request.headers.get('cf-connecting-ip') || 'unknown'}\`, 20, 3600000);
         if (!rl.allowed) return jsonResponse({ error: 'Too many login attempts' }, 429);
         const body = await request.json();
         const { email, password } = body;
@@ -1075,7 +1075,7 @@ export default {
         await env.DB.prepare('INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)')
           .bind(crypto.randomUUID(), user.id, await hashPassword(refreshToken), new Date(Date.now() + 30 * 24 * 3600000).toISOString(), new Date().toISOString()).run();
         await env.DB.prepare('UPDATE users SET updated_at = ? WHERE id = ?').bind(new Date().toISOString(), user.id).run();
-        await recordAuditLog(env, user.id, 'USER_LOGIN', `User logged in: ${email}`, null, request.headers.get('cf-connecting-ip') || 'edge');
+        await recordAuditLog(env, user.id, 'USER_LOGIN', \`User logged in: \${email}\`, null, request.headers.get('cf-connecting-ip') || 'edge');
         return jsonResponse({ access_token: accessToken, refresh_token: refreshToken, token_type: 'Bearer', expires_in: 3600 });
       }
 
@@ -1130,12 +1130,12 @@ export default {
         if (!filename || !content_type || !size) return jsonResponse({ error: 'filename, content_type, size required' }, 400);
         if (size > 50 * 1024 * 1024) return jsonResponse({ error: 'File too large (max 50MB)' }, 400);
         const fileId = crypto.randomUUID();
-        const r2Key = `uploads/${user.id}/${fileId}/${filename}`;
-        const uploadUrl = `https://${env.BUCKET}.r2.cloudflarestorage.com/${r2Key}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...`; // In production, generate proper signed URL
+        const r2Key = \`uploads/\${user.id}/\${fileId}/\${filename}\`;
+        const uploadUrl = \`https://\${env.BUCKET}.r2.cloudflarestorage.com/\${r2Key}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...\`; // In production, generate proper signed URL
         const now = new Date().toISOString();
         await env.DB.prepare('INSERT INTO files (id, user_id, filename, content_type, size, r2_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
           .bind(fileId, user.id, filename, content_type, size, r2Key, now).run();
-        await recordAuditLog(env, user.id, 'FILE_UPLOAD_INITIATED', `Initiated upload: ${filename}`, null, request.headers.get('cf-connecting-ip') || 'edge');
+        await recordAuditLog(env, user.id, 'FILE_UPLOAD_INITIATED', \`Initiated upload: \${filename}\`, null, request.headers.get('cf-connecting-ip') || 'edge');
         return jsonResponse({ upload_url: uploadUrl, file_id: fileId, r2_key: r2Key });
       }
 
@@ -1153,7 +1153,7 @@ export default {
       // ---- OpenAPI YAML ----
       if (url.pathname === '/api/openapi.yaml' && method === 'GET') {
         const spec = generateOpenAPISpec();
-        const yaml = Object.entries(spec).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join('\n');
+        const yaml = Object.entries(spec).map(([k, v]) => \`\${k}: \${JSON.stringify(v)}\`).join('\n');
         return new Response(yaml, { headers: { ...securityHeaders(), 'Content-Type': 'application/yaml' } });
       }
 
