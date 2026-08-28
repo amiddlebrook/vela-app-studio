@@ -1,0 +1,9 @@
+name = "vela-control-plane"
+account_id = "07f1b17fd676c14af148ff1d818383a9"
+main = "src/entry.ts"
+compatibility_date = "2026-08-25"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable objects, d1 and queues are declared in wrangler.jsonc; keep Toml minimal so
+# Wrangler has a valid config to parse. Additional bindings remain in wrangler.jsonc
+# for humans, but wrangler CLI will prefer this toml file when present.
