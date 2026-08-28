@@ -1159,7 +1159,7 @@ export default {
       // ---- OpenAPI YAML ----
       if (url.pathname === '/api/openapi.yaml' && method === 'GET') {
         const spec = generateOpenAPISpec();
-        const yaml = Object.entries(spec).map(([k, v]) => \`\${k}: \${JSON.stringify(v)}\`).join('\n');
+        const yaml = Object.entries(spec).map(([k, v]) => \`\${k}: \${JSON.stringify(v)}\`).join('\\n');
         return new Response(yaml, { headers: { ...securityHeaders(), 'Content-Type': 'application/yaml' } });
       }
 
