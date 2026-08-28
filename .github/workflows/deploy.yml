@@ -47,6 +47,20 @@ jobs:
             echo 'TOKEN_ENCRYPTION_KEY already configured.'
           fi
 
+          # The browser connection uses Cloudflare OAuth for account identity,
+          # but some Workers management endpoints (especially script subdomain
+          # enablement) reject OAuth access tokens. The same API token already
+          # used by this workflow to deploy Vela is installed into the runtime so
+          # generated apps can provision D1, upload Workers, and enable their
+          # workers.dev routes without a second user credential.
+          if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            PAYLOAD="$(jq -c --arg value "$CLOUDFLARE_API_TOKEN" '. + {CLOUDFLARE_API_TOKEN:$value}' <<<"$PAYLOAD")"
+            echo 'Synchronizing CLOUDFLARE_API_TOKEN into Worker runtime secrets.'
+          else
+            echo 'CLOUDFLARE_API_TOKEN GitHub Actions secret is missing.' >&2
+            exit 1
+          fi
+
           if grep -Fxq 'OPENROUTER_API_KEY' <<<"$SECRET_NAMES"; then
             echo 'OPENROUTER_API_KEY already configured on Worker.'
           elif [ -n "${OPENROUTER_API_KEY:-}" ]; then
