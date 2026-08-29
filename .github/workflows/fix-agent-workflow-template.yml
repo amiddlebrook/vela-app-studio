@@ -1,0 +1,35 @@
+name: Fix agent workflow template syntax
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-agent-workflow-template.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replace multiline curl template
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/agent-template.ts')
+          s = p.read_text()
+          start = s.index("  '          curl -fsS -X POST")
+          end = s.index("  '',\n].join('\\n');", start)
+          line = "  '          curl -fsS -X POST \"$VELA_CONTROL_PLANE/internal/agent/fail\" -H \"authorization: Bearer $VELA_BUILD_TOKEN\" -H \"content-type: application/json\" --data \"{\\\\\"project_id\\\\\":\\\\\"$VELA_PROJECT_ID\\\\\",\\\\\"build_id\\\\\":\\\\\"$VELA_BUILD_ID\\\\\",\\\\\"error\\\\\":\\\\\"GitHub Actions procedural engineering job failed; inspect build events and workflow logs.\\\\\"}\" || true',\n"
+          s = s[:start] + line + s[end:]
+          p.write_text(s)
+          PY
+          git config user.name 'Vela Repair Bot'
+          git config user.email 'vela-repair@users.noreply.github.com'
+          git add src/agent-template.ts
+          git rm .github/workflows/fix-agent-workflow-template.yml
+          git commit -m 'fix: generate syntactically valid agent workflow'
+          git push origin HEAD:main
