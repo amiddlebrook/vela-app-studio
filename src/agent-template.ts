@@ -388,8 +388,8 @@ console.log('VELA_AGENT_BUILD_COMPLETE', commitSha);
 
 export const AGENT_VALIDATOR = String.raw`#!/usr/bin/env bash
 set -euo pipefail
-ROOT="${1:-.}"
-MODE="${2:-standard}"
+ROOT="\${1:-.}"
+MODE="\${2:-standard}"
 cd "$ROOT"
 node .vela/validator.mjs "$MODE"
 `;
