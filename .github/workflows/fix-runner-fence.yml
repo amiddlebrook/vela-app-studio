@@ -1,0 +1,32 @@
+name: Fix runner template fences
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-runner-fence.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove literal backticks from raw runner template
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/agent-template.ts')
+          s=p.read_text()
+          s=s.replace("replace(/^```(?:json)?\\s*/i, '').replace(/```\\s*$/, '')", "replace(/^\\x60\\x60\\x60(?:json)?\\s*/i, '').replace(/\\x60\\x60\\x60\\s*$/, '')")
+          p.write_text(s)
+          PY
+          git config user.name 'Vela Repair Bot'
+          git config user.email 'vela-repair@users.noreply.github.com'
+          git add src/agent-template.ts
+          git rm .github/workflows/fix-runner-fence.yml
+          git commit -m 'fix: avoid raw-template backtick termination'
+          git push origin HEAD:main
