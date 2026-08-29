@@ -94,7 +94,10 @@ function retryBody(body: ChatBody, model: string, strictRetry: boolean): ChatBod
       content: 'STRICT JSON RETRY: the prior provider response was not parseable JSON. Return exactly one syntactically valid JSON value matching the requested schema. No Markdown, prose, comments, trailing text, or second JSON object. Escape every quote, backslash, newline, tab, and control character inside JSON strings correctly.',
     });
   }
-  return { ...body, model, messages, response_format: { type: 'json_object' } };
+  const next: ChatBody = { ...body, model, messages };
+  if (strictRetry) delete next.response_format;
+  else next.response_format = { type: 'json_object' };
+  return next;
 }
 
 async function strictJsonFetch(input: RequestInfo | URL, init: RequestInit | undefined, downstream: typeof fetch): Promise<Response> {
@@ -118,18 +121,18 @@ async function strictJsonFetch(input: RequestInfo | URL, init: RequestInit | und
     }
     lastResponse = response;
     if (!response.ok) {
-      lastReason = `HTTP ${response.status}`;
+      lastReason = `model ${model} returned HTTP ${response.status}`;
       continue;
     }
 
     const decoded = await readOpenRouter(response);
     if (!decoded) {
-      lastReason = 'OpenRouter envelope was not valid JSON';
+      lastReason = `model ${model} returned an invalid OpenRouter envelope`;
       continue;
     }
     const normalized = normalizeJsonText(decoded.content);
     if (!normalized) {
-      lastReason = `model ${model} returned non-JSON content`;
+      lastReason = `model ${model} returned non-JSON content (${decoded.content.length} chars)`;
       console.warn(JSON.stringify({ event: 'strict_json_model_rejected', model, chars: decoded.content.length }));
       continue;
     }
