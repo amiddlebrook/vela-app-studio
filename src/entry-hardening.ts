@@ -2,8 +2,28 @@ export { BuildCoordinator } from './index';
 
 const networkFetch = globalThis.fetch.bind(globalThis);
 let installed = false;
+let workersDevSubdomain = 'averymiddlebrook2014';
+let cloudflareApiToken: string | undefined;
+let cloudflareAccountId: string | undefined;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+function bindRuntime(env: unknown): void {
+  const runtime = env as {
+    WORKERS_DEV_SUBDOMAIN?: unknown;
+    CLOUDFLARE_API_TOKEN?: unknown;
+    CLOUDFLARE_ACCOUNT_ID?: unknown;
+  } | null;
+
+  const subdomain = runtime?.WORKERS_DEV_SUBDOMAIN;
+  if (typeof subdomain === 'string' && subdomain.trim()) workersDevSubdomain = subdomain.trim();
+
+  const token = runtime?.CLOUDFLARE_API_TOKEN;
+  cloudflareApiToken = typeof token === 'string' && token.trim() ? token.trim() : undefined;
+
+  const accountId = runtime?.CLOUDFLARE_ACCOUNT_ID;
+  cloudflareAccountId = typeof accountId === 'string' && accountId.trim() ? accountId.trim() : undefined;
+}
 
 function requestUrl(input: RequestInfo | URL): string {
   return typeof input === 'string'
@@ -11,6 +31,10 @@ function requestUrl(input: RequestInfo | URL): string {
     : input instanceof URL
       ? input.href
       : input.url;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function decodeBase64Utf8(value: string): string {
@@ -94,6 +118,89 @@ async function hardenCloudflareWorkerUpload(url: string, init?: RequestInit): Pr
   return { ...init, body: form };
 }
 
+function generatedWorkerScript(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+
+  const suffix = `.${workersDevSubdomain}.workers.dev`;
+  if (!parsed.hostname.toLowerCase().endsWith(suffix.toLowerCase())) return null;
+  const script = parsed.hostname.slice(0, -suffix.length);
+  return script.startsWith('vela-') && script !== 'vela-control-plane' ? script : null;
+}
+
+async function enableGeneratedWorkerRoute(script: string): Promise<void> {
+  if (!cloudflareApiToken || !cloudflareAccountId) return;
+
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cloudflareAccountId)}/workers/scripts/${encodeURIComponent(script)}/subdomain`;
+  const response = await networkFetch(endpoint, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${cloudflareApiToken}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ enabled: true, previews_enabled: true }),
+  });
+
+  if (!response.ok) {
+    const detail = (await response.clone().text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
+    console.warn(JSON.stringify({ event: 'outer_generated_worker_route_enable_failed', script, status: response.status, detail }));
+  } else {
+    console.warn(JSON.stringify({ event: 'outer_generated_worker_route_enabled', script }));
+  }
+}
+
+async function fetchGeneratedWorkerWithPatience(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const url = requestUrl(input);
+  const script = generatedWorkerScript(url);
+  if (!script) return networkFetch(input, init);
+
+  let response: Response | undefined;
+  let lastError: unknown;
+  try {
+    response = await networkFetch(input, init);
+    if (response.status >= 200 && response.status < 400) return response;
+    // A real application 5xx should be surfaced immediately so the existing
+    // fallback deployer can repair the application rather than waiting on DNS.
+    if (response.status >= 500 && response.status !== 530) return response;
+  } catch (error) {
+    lastError = error;
+  }
+
+  try {
+    await enableGeneratedWorkerRoute(script);
+  } catch (error) {
+    console.warn(JSON.stringify({
+      event: 'outer_generated_worker_route_enable_exception',
+      script,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+  }
+
+  // workers.dev route publication is eventually consistent. Give Cloudflare
+  // a full minute instead of declaring a healthy upload dead after ~20 seconds.
+  for (const waitMs of [500, 1000, 2000, 4000, 8000, 12000, 15000, 20000]) {
+    await delay(waitMs);
+    try {
+      response = await networkFetch(input, init);
+      if (response.status >= 200 && response.status < 400) {
+        console.warn(JSON.stringify({ event: 'outer_generated_worker_verified_after_wait', script, status: response.status }));
+        return response;
+      }
+      if (response.status >= 500 && response.status !== 530) return response;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (response) return response;
+  if (lastError instanceof Error) throw lastError;
+  throw new Error(`Generated Worker ${script} remained unreachable after route publication wait`);
+}
+
 function installHardeningGuard(): void {
   if (installed) return;
   installed = true;
@@ -102,24 +209,26 @@ function installHardeningGuard(): void {
     const url = requestUrl(input);
     init = hardenGithubWorkerWrite(url, init);
     init = await hardenCloudflareWorkerUpload(url, init);
-    return networkFetch(input, init);
+    return fetchGeneratedWorkerWithPatience(input, init);
   };
 }
 
 installHardeningGuard();
 
-// Import the existing runtime only after the lowest-level source hardening
-// guard is installed. All nested GitHub and Cloudflare transports eventually
-// pass through this guard before reaching the network.
+// Import the existing runtime only after the lowest-level hardening guard is
+// installed. All nested GitHub, Cloudflare and workers.dev transports pass
+// through this guard before reaching the network.
 const entry = import('./entry-final');
 
 export default {
   async fetch(request: Request, env: unknown): Promise<Response> {
+    bindRuntime(env);
     const module = await entry;
     return module.default.fetch(request, env as never);
   },
 
   async queue(batch: MessageBatch<unknown>, env: unknown): Promise<void> {
+    bindRuntime(env);
     const module = await entry;
     return module.default.queue(batch as never, env as never);
   },
