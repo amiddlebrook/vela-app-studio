@@ -38,6 +38,12 @@ function isGithubContentsUrl(url: string): boolean {
   return /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/contents\//.test(url);
 }
 
+function sanitizeRepositoryDescription(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const cleaned = value.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 160);
+  return cleaned || undefined;
+}
+
 async function retryGithubContentUpdateWithSha(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
@@ -110,9 +116,6 @@ async function recoverGithubRepositoryCreate(
 
   const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
 
-  // A previous attempt can create the repository before Vela stores the
-  // full_name in D1. In that case creation is already complete and the 422 is
-  // simply an idempotency collision.
   const existing = await existingGithubRepository(headers, name);
   if (existing) {
     console.warn(JSON.stringify({ event: 'github_repository_create_recovered', repository: name }));
@@ -126,18 +129,13 @@ async function recoverGithubRepositoryCreate(
     detail: initialDetail.replace(/\s+/g, ' ').slice(0, 500),
   }));
 
-  // GitHub can answer repository creation with a generic 422 when creation is
-  // briefly throttled or when an optional repository setting cannot be applied.
-  // Retry serially, progressively reducing the request to the fields Vela
-  // actually requires. This avoids turning a transient/optional-setting failure
-  // into a terminal app build failure.
   const attempts: Array<{ waitMs: number; payload: Record<string, unknown> }> = [
-    { waitMs: 1200, payload: { ...payload } },
+    { waitMs: 1200, payload: { ...payload, description: sanitizeRepositoryDescription(payload.description) } },
     {
       waitMs: 3000,
       payload: {
         name,
-        description: typeof payload.description === 'string' ? payload.description.slice(0, 160) : undefined,
+        description: sanitizeRepositoryDescription(payload.description),
         private: true,
         auto_init: true,
       },
@@ -184,24 +182,12 @@ function installGithubBootstrapGuard(): void {
     const method = init?.method?.toUpperCase() || (input instanceof Request ? input.method.toUpperCase() : 'GET');
     let nextInit = init;
 
-    // The OAuth connection identifies the user's Cloudflare account, but several
-    // Worker management endpoints (notably workers.dev subdomain management) do
-    // not accept Cloudflare OAuth access tokens. Vela's own deployment token is
-    // installed as a Worker secret by CI and has the same Workers Scripts/D1
-    // permissions used to deploy this control plane. Use it for account API
-    // resource operations so generated Workers can actually receive a public
-    // workers.dev route instead of being uploaded but left unreachable.
     if (url.startsWith('https://api.cloudflare.com/client/v4/accounts/') && currentCloudflareApiToken) {
       const headers = new Headers(nextInit?.headers || (input instanceof Request ? input.headers : undefined));
       headers.set('authorization', `Bearer ${currentCloudflareApiToken}`);
       nextInit = { ...nextInit, headers };
     }
 
-    // Stage 4 used the local repository slug after Stage 3 created the repo,
-    // producing /repos/<repo>/contents/... instead of
-    // /repos/<owner>/<repo>/contents/... and therefore a guaranteed GitHub 404.
-    // Repair that stale-owner path at the transport boundary so both current
-    // failed projects and future retries are idempotent.
     if (url.startsWith('https://api.github.com/') && method === 'PUT') {
       const parsed = new URL(url);
       const ownerless = parsed.pathname.match(/^\/repos\/([^/]+)\/contents\/(.+)$/);
@@ -224,6 +210,9 @@ function installGithubBootstrapGuard(): void {
     ) {
       try {
         const payload = JSON.parse(init.body) as Record<string, unknown>;
+        const description = sanitizeRepositoryDescription(payload.description);
+        if (description) payload.description = description;
+        else delete payload.description;
         payload.auto_init = true;
         nextInit = { ...nextInit, body: JSON.stringify(payload) };
       } catch {}
@@ -240,17 +229,10 @@ function installGithubBootstrapGuard(): void {
       response = await recoverGithubRepositoryCreate(nextInput, nextInit, response);
     }
 
-    // GitHub's contents API requires the current blob SHA whenever a PUT updates
-    // an existing path. Vela's optimistic GET can miss that SHA after a prior
-    // partial build or transient 404. Recover the current SHA and retry the same
-    // write instead of failing the entire build with HTTP 422.
     if (method === 'PUT' && response.status === 422 && isGithubContentsUrl(url)) {
       response = await retryGithubContentUpdateWithSha(nextInput, nextInit, response);
     }
 
-    // GitHub can briefly return 404 immediately after repository creation.
-    // Retry fully-qualified content writes so propagation never becomes a build
-    // failure after the repository already exists.
     if (
       response.status === 404 &&
       method === 'PUT' &&
@@ -269,9 +251,6 @@ function installGithubBootstrapGuard(): void {
 
 installGithubBootstrapGuard();
 
-// Import entry-safe only after installing the GitHub bootstrap guard. This makes
-// entry-safe capture this guarded fetch as its native transport, so its existing
-// Cloudflare/source-repair guards compose on top instead of replacing it.
 const entry = import('./entry-safe');
 
 export default {
