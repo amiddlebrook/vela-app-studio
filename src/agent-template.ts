@@ -141,7 +141,7 @@ async function llm(role, system, user) {
 }
 
 function extractJson(text) {
-  const cleaned = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  const cleaned = String(text || '').trim().replace(/^\x60\x60\x60(?:json)?\s*/i, '').replace(/\x60\x60\x60\s*$/, '').trim();
   try { return JSON.parse(cleaned); } catch {}
   const first = cleaned.indexOf('{');
   const last = cleaned.lastIndexOf('}');
