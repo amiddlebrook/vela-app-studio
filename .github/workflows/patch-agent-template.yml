@@ -1,0 +1,33 @@
+name: Patch agent template escaping
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/patch-agent-template.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch literal bash parameter expansion
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const p = 'src/agent-template.ts';
+          let s = fs.readFileSync(p, 'utf8');
+          s = s.replace('ROOT="${1:-.}"', 'ROOT="\\${1:-.}"');
+          s = s.replace('MODE="${2:-standard}"', 'MODE="\\${2:-standard}"');
+          fs.writeFileSync(p, s);
+          NODE
+          git config user.name 'Vela Repair Bot'
+          git config user.email 'vela-repair@users.noreply.github.com'
+          git add src/agent-template.ts
+          git rm .github/workflows/patch-agent-template.yml
+          git commit -m 'fix: escape validator shell expansion in template'
+          git push origin HEAD:main
