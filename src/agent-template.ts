@@ -388,14 +388,15 @@ await post('/internal/agent/complete', { commit_sha: commitSha, validation: vali
 console.log('VELA_AGENT_BUILD_COMPLETE', commitSha);
 `;
 
-export const AGENT_VALIDATOR = String.raw`#!/usr/bin/env bash
-set -euo pipefail
-ROOT="${'
-MODE="${'
-cd "$ROOT"
-node .vela/validator.mjs "$MODE"
-`;
-
+export const AGENT_VALIDATOR = [
+  '#!/usr/bin/env bash',
+  'set -euo pipefail',
+  'ROOT="${1:-.}"',
+  'MODE="${2:-standard}"',
+  'cd "$ROOT"',
+  'node .vela/validator.mjs "$MODE"',
+  '',
+].join('\n');
 export const AGENT_VALIDATOR_JS = String.raw`#!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
