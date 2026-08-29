@@ -45,6 +45,41 @@ function rewriteWorkersDevInput(input: RequestInfo | URL): RequestInfo | URL {
   return input;
 }
 
+function rewriteWorkersDevText(text: string): string {
+  let rewritten = text.replace(
+    /https:\/\/([a-z0-9-]+)\.workers\.dev\b/gi,
+    (_match, script: string) => `https://${script}.${workersDevSubdomain}.workers.dev`,
+  );
+
+  // The Studio HTML builds its live-app link client-side from p.worker_name,
+  // so the raw response contains the JavaScript template expression rather
+  // than a concrete hostname. Rewrite that template too so successful builds
+  // never present an invalid one-label workers.dev link.
+  rewritten = rewritten.replaceAll(
+    'https://${esc(p.worker_name)}.workers.dev',
+    `https://\${esc(p.worker_name)}.${workersDevSubdomain}.workers.dev`,
+  );
+
+  return rewritten;
+}
+
+async function rewriteWorkersDevResponse(response: Response): Promise<Response> {
+  const contentType = response.headers.get('content-type') || '';
+  if (!/text\/html|application\/json|text\/plain/i.test(contentType)) return response;
+
+  const text = await response.text();
+  const rewritten = rewriteWorkersDevText(text);
+  if (rewritten === text) return new Response(text, response);
+
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  return new Response(rewritten, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 function installWorkersDevTransportGuard(): void {
   if (installed) return;
   installed = true;
@@ -65,7 +100,8 @@ export default {
   async fetch(request: Request, env: unknown): Promise<Response> {
     bindRuntime(env);
     const module = await entry;
-    return module.default.fetch(request, env as never);
+    const response = await module.default.fetch(request, env as never);
+    return rewriteWorkersDevResponse(response);
   },
 
   async queue(batch: MessageBatch<unknown>, env: unknown): Promise<void> {
