@@ -4,7 +4,7 @@
   "account_id": "07f1b17fd676c14af148ff1d818383a9",
   "main": "src/entry-hardening.ts",
   "compatibility_date": "2026-08-25",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "vars": {
     "APP_ORIGIN": "https://vela-control-plane.averymiddlebrook2014.workers.dev",
     "CLOUDFLARE_ACCOUNT_ID": "07f1b17fd676c14af148ff1d818383a9",
