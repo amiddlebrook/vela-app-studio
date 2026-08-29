@@ -1,0 +1,35 @@
+name: Harden procedural runner template
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/patch-agent-template-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch runner and validator templates
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const p = 'src/agent-template.ts';
+          let s = fs.readFileSync(p, 'utf8');
+          s = s.replace('ROOT="\\${1:-.}"', 'ROOT="${\'$\'}{1:-.}"');
+          s = s.replace('MODE="\\${2:-standard}"', 'MODE="${\'$\'}{2:-standard}"');
+          s = s.replace('        applyOperations(result);\n', '        applyOperations(result);\n        shell(\'git add -N .\');\n');
+          s = s.replace('  applyOperations(repair);\n', '  applyOperations(repair);\n  shell(\'git add -N .\');\n');
+          fs.writeFileSync(p, s);
+          NODE
+          git config user.name 'Vela Repair Bot'
+          git config user.email 'vela-repair@users.noreply.github.com'
+          git add src/agent-template.ts
+          git rm .github/workflows/patch-agent-template-v2.yml
+          git commit -m 'fix: harden procedural runner validation context'
+          git push origin HEAD:main
