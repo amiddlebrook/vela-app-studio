@@ -2,19 +2,37 @@ export { BuildCoordinator } from './index';
 
 const platformFetch = globalThis.fetch.bind(globalThis);
 let workersDevSubdomain = 'averymiddlebrook2014';
+let cloudflareApiToken: string | undefined;
+let cloudflareAccountId: string | undefined;
 let installed = false;
 
 function bindRuntime(env: unknown): void {
-  const value = (env as { WORKERS_DEV_SUBDOMAIN?: unknown } | null)?.WORKERS_DEV_SUBDOMAIN;
-  if (typeof value === 'string' && value.trim()) workersDevSubdomain = value.trim();
+  const runtime = env as {
+    WORKERS_DEV_SUBDOMAIN?: unknown;
+    CLOUDFLARE_API_TOKEN?: unknown;
+    CLOUDFLARE_ACCOUNT_ID?: unknown;
+  } | null;
+
+  const subdomain = runtime?.WORKERS_DEV_SUBDOMAIN;
+  if (typeof subdomain === 'string' && subdomain.trim()) workersDevSubdomain = subdomain.trim();
+
+  const token = runtime?.CLOUDFLARE_API_TOKEN;
+  cloudflareApiToken = typeof token === 'string' && token.trim() ? token.trim() : undefined;
+
+  const accountId = runtime?.CLOUDFLARE_ACCOUNT_ID;
+  cloudflareAccountId = typeof accountId === 'string' && accountId.trim() ? accountId.trim() : undefined;
 }
 
-function rewriteWorkersDevInput(input: RequestInfo | URL): RequestInfo | URL {
-  const raw = typeof input === 'string'
+function requestUrl(input: RequestInfo | URL): string {
+  return typeof input === 'string'
     ? input
     : input instanceof URL
       ? input.href
       : input.url;
+}
+
+function rewriteWorkersDevInput(input: RequestInfo | URL): RequestInfo | URL {
+  const raw = requestUrl(input);
 
   let parsed: URL;
   try {
@@ -43,6 +61,100 @@ function rewriteWorkersDevInput(input: RequestInfo | URL): RequestInfo | URL {
   }
 
   return input;
+}
+
+function generatedWorkerScript(input: RequestInfo | URL): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestUrl(input));
+  } catch {
+    return null;
+  }
+
+  const suffix = `.${workersDevSubdomain}.workers.dev`;
+  if (!parsed.hostname.toLowerCase().endsWith(suffix.toLowerCase())) return null;
+  const script = parsed.hostname.slice(0, -suffix.length);
+  return script.startsWith('vela-') && script !== 'vela-control-plane' ? script : null;
+}
+
+function healthy(response: Response): boolean {
+  return response.status >= 200 && response.status < 400;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function ensureGeneratedWorkerRoute(script: string): Promise<void> {
+  if (!cloudflareApiToken || !cloudflareAccountId) return;
+
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cloudflareAccountId)}/workers/scripts/${encodeURIComponent(script)}/subdomain`;
+  const response = await platformFetch(endpoint, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${cloudflareApiToken}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ enabled: true, previews_enabled: true }),
+  });
+
+  if (!response.ok) {
+    const detail = (await response.clone().text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
+    console.warn(JSON.stringify({
+      event: 'generated_worker_route_repair_failed',
+      script,
+      status: response.status,
+      detail,
+    }));
+    return;
+  }
+
+  console.warn(JSON.stringify({ event: 'generated_worker_route_repaired', script }));
+}
+
+async function fetchWithGeneratedWorkerRepair(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const rewritten = rewriteWorkersDevInput(input);
+  const script = generatedWorkerScript(rewritten);
+  if (!script) return platformFetch(rewritten, init);
+
+  let response: Response | undefined;
+  let lastError: unknown;
+  try {
+    response = await platformFetch(rewritten, init);
+    if (healthy(response)) return response;
+  } catch (error) {
+    lastError = error;
+  }
+
+  // A freshly uploaded Worker can exist before its workers.dev route is usable.
+  // Repair the route with the CI API token and then give Cloudflare enough time
+  // to publish it before the core build marks a valid deployment as failed.
+  try {
+    await ensureGeneratedWorkerRoute(script);
+  } catch (error) {
+    console.warn(JSON.stringify({
+      event: 'generated_worker_route_repair_exception',
+      script,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+  }
+
+  for (const waitMs of [400, 1000, 2000, 4000, 6000, 8000]) {
+    await delay(waitMs);
+    try {
+      response = await platformFetch(rewritten, init);
+      if (healthy(response)) {
+        console.warn(JSON.stringify({ event: 'generated_worker_verified_after_route_repair', script, status: response.status }));
+        return response;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (response) return response;
+  if (lastError instanceof Error) throw lastError;
+  throw new Error(`Generated Worker ${script} could not be reached after route repair`);
 }
 
 function rewriteWorkersDevText(text: string): string {
@@ -84,7 +196,7 @@ function installWorkersDevTransportGuard(): void {
   if (installed) return;
   installed = true;
   (globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = async (input, init) => {
-    return platformFetch(rewriteWorkersDevInput(input), init);
+    return fetchWithGeneratedWorkerRepair(input, init);
   };
 }
 
