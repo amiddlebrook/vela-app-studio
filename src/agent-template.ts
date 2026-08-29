@@ -65,10 +65,7 @@ export const AGENT_WORKFLOW = [
   '        if: failure()',
   '        shell: bash',
   '        run: |',
-  '          curl -fsS -X POST "${VELA_CONTROL_PLANE}/internal/agent/fail" \
-  '            -H "authorization: Bearer ${VELA_BUILD_TOKEN}" \
-  '            -H "content-type: application/json" \
-  '            --data "{\\"project_id\\":\\"${VELA_PROJECT_ID}\\",\\"build_id\\":\\"${VELA_BUILD_ID}\\",\\"error\\":\\"GitHub Actions procedural engineering job failed; inspect build events and workflow logs.\\"}" || true',
+  '          curl -fsS -X POST "$VELA_CONTROL_PLANE/internal/agent/fail" -H "authorization: Bearer $VELA_BUILD_TOKEN" -H "content-type: application/json" --data "{\\"project_id\\":\\"$VELA_PROJECT_ID\\",\\"build_id\\":\\"$VELA_BUILD_ID\\",\\"error\\":\\"GitHub Actions procedural engineering job failed; inspect build events and workflow logs.\\"}" || true',
   '',
 ].join('\n');
 
