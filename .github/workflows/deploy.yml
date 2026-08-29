@@ -158,6 +158,33 @@ jobs:
             done <<<"$scripts"
           fi
 
+      - name: Probe generated workers.dev routes
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
+          SUBDOMAIN='averymiddlebrook2014'
+          scripts="$(curl -fsS "$API/scripts" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result[]?.id | select(startswith("vela-") and . != "vela-control-plane")')"
+          while IFS= read -r script; do
+            [ -n "$script" ] || continue
+            url="https://${script}.${SUBDOMAIN}.workers.dev/"
+            status='000'
+            for attempt in {1..5}; do
+              status="$(curl -sS -o /tmp/vela-generated-worker.out -w '%{http_code}' --max-time 15 "$url" || true)"
+              if [[ "$status" == 2* || "$status" == 3* ]]; then break; fi
+              sleep 2
+            done
+            echo "GENERATED_WORKER_PROBE script=$script status=$status url=$url"
+            if [[ "$status" != 2* && "$status" != 3* ]]; then
+              echo 'Response preview:'
+              head -c 800 /tmp/vela-generated-worker.out 2>/dev/null || true
+              echo
+            fi
+          done <<<"$scripts"
+
       - name: Runtime smoke test
         shell: bash
         env:
