@@ -6,12 +6,15 @@ let cloudflareApiToken: string | undefined;
 let cloudflareAccountId: string | undefined;
 let installed = false;
 
+type RuntimeEnv = {
+  DB?: D1Database;
+  WORKERS_DEV_SUBDOMAIN?: unknown;
+  CLOUDFLARE_API_TOKEN?: unknown;
+  CLOUDFLARE_ACCOUNT_ID?: unknown;
+};
+
 function bindRuntime(env: unknown): void {
-  const runtime = env as {
-    WORKERS_DEV_SUBDOMAIN?: unknown;
-    CLOUDFLARE_API_TOKEN?: unknown;
-    CLOUDFLARE_ACCOUNT_ID?: unknown;
-  } | null;
+  const runtime = env as RuntimeEnv | null;
 
   const subdomain = runtime?.WORKERS_DEV_SUBDOMAIN;
   if (typeof subdomain === 'string' && subdomain.trim()) workersDevSubdomain = subdomain.trim();
@@ -41,11 +44,6 @@ function rewriteWorkersDevInput(input: RequestInfo | URL): RequestInfo | URL {
     return input;
   }
 
-  // Vela's core deployer historically returned/verified
-  // https://<script>.workers.dev. Cloudflare account workers.dev URLs are
-  // https://<script>.<account-subdomain>.workers.dev. Repair the legacy
-  // one-label hostname at the lowest transport layer so verification cannot
-  // accidentally probe an NXDOMAIN/wrong route again.
   if (/^[^.]+\.workers\.dev$/i.test(parsed.hostname)) {
     const script = parsed.hostname.slice(0, -'.workers.dev'.length);
     parsed.hostname = `${script}.${workersDevSubdomain}.workers.dev`;
@@ -85,6 +83,16 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function generatedWorkerFetch(input: RequestInfo | URL, init?: RequestInit, timeoutMs = 7000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort('generated worker verification timeout'), timeoutMs);
+  try {
+    return await platformFetch(input, { ...init, signal: init?.signal ?? controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function ensureGeneratedWorkerRoute(script: string): Promise<void> {
   if (!cloudflareApiToken || !cloudflareAccountId) return;
 
@@ -120,15 +128,12 @@ async function fetchWithGeneratedWorkerRepair(input: RequestInfo | URL, init?: R
   let response: Response | undefined;
   let lastError: unknown;
   try {
-    response = await platformFetch(rewritten, init);
+    response = await generatedWorkerFetch(rewritten, init);
     if (healthy(response)) return response;
   } catch (error) {
     lastError = error;
   }
 
-  // A freshly uploaded Worker can exist before its workers.dev route is usable.
-  // Repair the route with the CI API token and then give Cloudflare enough time
-  // to publish it before the core build marks a valid deployment as failed.
   try {
     await ensureGeneratedWorkerRoute(script);
   } catch (error) {
@@ -139,10 +144,10 @@ async function fetchWithGeneratedWorkerRepair(input: RequestInfo | URL, init?: R
     }));
   }
 
-  for (const waitMs of [400, 1000, 2000, 4000, 6000, 8000]) {
+  for (const waitMs of [400, 1000, 2000, 4000]) {
     await delay(waitMs);
     try {
-      response = await platformFetch(rewritten, init);
+      response = await generatedWorkerFetch(rewritten, init);
       if (healthy(response)) {
         console.warn(JSON.stringify({ event: 'generated_worker_verified_after_route_repair', script, status: response.status }));
         return response;
@@ -157,16 +162,56 @@ async function fetchWithGeneratedWorkerRepair(input: RequestInfo | URL, init?: R
   throw new Error(`Generated Worker ${script} could not be reached after route repair`);
 }
 
+async function reconcileStuckDeployments(env: unknown): Promise<void> {
+  const db = (env as RuntimeEnv | null)?.DB;
+  if (!db) return;
+
+  const cutoff = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+  let projects: { id: string; worker_name: string; updated_at: string }[] = [];
+  try {
+    const result = await db.prepare(
+      "SELECT id, worker_name, updated_at FROM projects WHERE status = 'deploying_worker' AND worker_name IS NOT NULL AND updated_at < ? ORDER BY updated_at ASC LIMIT 5",
+    ).bind(cutoff).all<{ id: string; worker_name: string; updated_at: string }>();
+    projects = result.results;
+  } catch (error) {
+    console.warn(JSON.stringify({
+      event: 'stuck_deployment_scan_failed',
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+    return;
+  }
+
+  for (const project of projects) {
+    const workerUrl = `https://${project.worker_name}.${workersDevSubdomain}.workers.dev/`;
+    try {
+      await ensureGeneratedWorkerRoute(project.worker_name);
+      const response = await generatedWorkerFetch(workerUrl, { redirect: 'manual' }, 7000);
+      if (!healthy(response)) continue;
+
+      const now = new Date().toISOString();
+      await db.batch([
+        db.prepare("UPDATE projects SET status = 'live', updated_at = ? WHERE id = ? AND status = 'deploying_worker'").bind(now, project.id),
+        db.prepare('INSERT INTO build_events (id, project_id, kind, detail, stage, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .bind(crypto.randomUUID(), project.id, 'live', `Recovered live deployment after successful edge probe: ${workerUrl}`, 'live', now),
+      ]);
+      console.warn(JSON.stringify({ event: 'stuck_deployment_reconciled', projectId: project.id, worker: project.worker_name }));
+    } catch (error) {
+      console.warn(JSON.stringify({
+        event: 'stuck_deployment_probe_failed',
+        projectId: project.id,
+        worker: project.worker_name,
+        reason: error instanceof Error ? error.message : String(error),
+      }));
+    }
+  }
+}
+
 function rewriteWorkersDevText(text: string): string {
   let rewritten = text.replace(
     /https:\/\/([a-z0-9-]+)\.workers\.dev\b/gi,
     (_match, script: string) => `https://${script}.${workersDevSubdomain}.workers.dev`,
   );
 
-  // The Studio HTML builds its live-app link client-side from p.worker_name,
-  // so the raw response contains the JavaScript template expression rather
-  // than a concrete hostname. Rewrite that template too so successful builds
-  // never present an invalid one-label workers.dev link.
   rewritten = rewritten.replaceAll(
     'https://${esc(p.worker_name)}.workers.dev',
     `https://\${esc(p.worker_name)}.${workersDevSubdomain}.workers.dev`,
@@ -202,15 +247,15 @@ function installWorkersDevTransportGuard(): void {
 
 installWorkersDevTransportGuard();
 
-// Import the existing bootstrap only after the hostname guard is installed.
-// Its own nativeFetch therefore inherits this repair, and entry-safe inherits
-// the bootstrap guard in turn. This keeps all existing GitHub/Cloudflare source
-// repair behavior while fixing the actual generated-worker verification URL.
 const entry = import('./entry-bootstrap');
 
 export default {
   async fetch(request: Request, env: unknown): Promise<Response> {
     bindRuntime(env);
+    const url = new URL(request.url);
+    if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/projects')) {
+      await reconcileStuckDeployments(env);
+    }
     const module = await entry;
     const response = await module.default.fetch(request, env as never);
     return rewriteWorkersDevResponse(response);
