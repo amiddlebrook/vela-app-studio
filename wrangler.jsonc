@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "vela-control-plane",
   "account_id": "07f1b17fd676c14af148ff1d818383a9",
-  "main": "src/entry-self-heal.ts",
+  "main": "src/entry-watchdog.ts",
   "compatibility_date": "2026-08-25",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "vars": {
@@ -11,6 +11,9 @@
     "WORKERS_DEV_SUBDOMAIN": "averymiddlebrook2014",
     "OPENROUTER_MODEL": "z-ai/glm-5.2:free",
     "CLOUDFLARE_AI_MODEL": "@cf/meta/llama-3.1-8b-instruct-fast"
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
   },
   "secrets": {
     "required": ["SESSION_SECRET", "TOKEN_ENCRYPTION_KEY"]
