@@ -76,6 +76,104 @@ async function retryGithubContentUpdateWithSha(
   }
 }
 
+async function existingGithubRepository(headers: Headers, name: string): Promise<Response | null> {
+  const login = await githubLogin(headers);
+  if (!login) return null;
+
+  try {
+    const existing = await nativeFetch(
+      `https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(name)}`,
+      { headers },
+    );
+    return existing.ok ? existing : null;
+  } catch {
+    return null;
+  }
+}
+
+async function recoverGithubRepositoryCreate(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  response: Response,
+): Promise<Response> {
+  if (response.status !== 422 || typeof init.body !== 'string') return response;
+
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(init.body) as Record<string, unknown>;
+  } catch {
+    return response;
+  }
+
+  const name = typeof payload.name === 'string' ? payload.name.trim() : '';
+  if (!name) return response;
+
+  const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+
+  // A previous attempt can create the repository before Vela stores the
+  // full_name in D1. In that case creation is already complete and the 422 is
+  // simply an idempotency collision.
+  const existing = await existingGithubRepository(headers, name);
+  if (existing) {
+    console.warn(JSON.stringify({ event: 'github_repository_create_recovered', repository: name }));
+    return existing;
+  }
+
+  const initialDetail = await response.clone().text().catch(() => '');
+  console.warn(JSON.stringify({
+    event: 'github_repository_create_422',
+    repository: name,
+    detail: initialDetail.replace(/\s+/g, ' ').slice(0, 500),
+  }));
+
+  // GitHub can answer repository creation with a generic 422 when creation is
+  // briefly throttled or when an optional repository setting cannot be applied.
+  // Retry serially, progressively reducing the request to the fields Vela
+  // actually requires. This avoids turning a transient/optional-setting failure
+  // into a terminal app build failure.
+  const attempts: Array<{ waitMs: number; payload: Record<string, unknown> }> = [
+    { waitMs: 1200, payload: { ...payload } },
+    {
+      waitMs: 3000,
+      payload: {
+        name,
+        description: typeof payload.description === 'string' ? payload.description.slice(0, 160) : undefined,
+        private: true,
+        auto_init: true,
+      },
+    },
+    {
+      waitMs: 6000,
+      payload: {
+        name,
+        private: true,
+        auto_init: false,
+      },
+    },
+  ];
+
+  let latest = response;
+  for (const attempt of attempts) {
+    await delay(attempt.waitMs);
+    const retryPayload = Object.fromEntries(Object.entries(attempt.payload).filter(([, value]) => value !== undefined));
+    latest = await nativeFetch(input, { ...init, body: JSON.stringify(retryPayload) });
+    if (latest.ok) {
+      console.warn(JSON.stringify({ event: 'github_repository_create_retry_succeeded', repository: name, waitMs: attempt.waitMs }));
+      return latest;
+    }
+
+    if (latest.status !== 422) return latest;
+
+    const appeared = await existingGithubRepository(headers, name);
+    if (appeared) {
+      console.warn(JSON.stringify({ event: 'github_repository_create_recovered_after_retry', repository: name }));
+      return appeared;
+    }
+  }
+
+  return latest;
+}
+
 function installGithubBootstrapGuard(): void {
   if (githubBootstrapInstalled) return;
   githubBootstrapInstalled = true;
@@ -133,30 +231,13 @@ function installGithubBootstrapGuard(): void {
 
     let response = await nativeFetch(nextInput, nextInit);
 
-    // A failed build can leave the private repo created before Vela records it
-    // in D1. Treat GitHub's "name already exists" response as an idempotent
-    // create by resolving the existing repository and continuing the build.
     if (
       url === 'https://api.github.com/user/repos' &&
       method === 'POST' &&
       response.status === 422 &&
-      typeof nextInit?.body === 'string'
+      nextInit
     ) {
-      try {
-        const payload = JSON.parse(nextInit.body) as { name?: string };
-        const name = payload.name?.trim();
-        if (name) {
-          const headers = new Headers(nextInit.headers);
-          const login = await githubLogin(headers);
-          if (login) {
-            const existing = await nativeFetch(`https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(name)}`, { headers });
-            if (existing.ok) {
-              console.warn(JSON.stringify({ event: 'github_repository_create_recovered', repository: `${login}/${name}` }));
-              return existing;
-            }
-          }
-        }
-      } catch {}
+      response = await recoverGithubRepositoryCreate(nextInput, nextInit, response);
     }
 
     // GitHub's contents API requires the current blob SHA whenever a PUT updates
@@ -175,7 +256,7 @@ function installGithubBootstrapGuard(): void {
       method === 'PUT' &&
       isGithubContentsUrl(url)
     ) {
-      for (const waitMs of [150, 350, 750]) {
+      for (const waitMs of [150, 350, 750, 1500]) {
         await delay(waitMs);
         response = await nativeFetch(nextInput, nextInit);
         if (response.status !== 404) break;
