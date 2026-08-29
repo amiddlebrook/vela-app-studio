@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "vela-control-plane",
   "account_id": "07f1b17fd676c14af148ff1d818383a9",
-  "main": "src/entry-ui.ts",
+  "main": "src/entry-failsafe.ts",
   "compatibility_date": "2026-08-25",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "vars": {
