@@ -2,6 +2,13 @@ import { BuildCoordinator } from './index';
 
 export { BuildCoordinator };
 
+type BootstrapEnv = {
+  DB?: D1Database;
+  CLOUDFLARE_API_TOKEN?: string;
+};
+
+type BuildQueueBody = { projectId?: string; prompt?: string; resumeFrom?: string };
+
 const nativeFetch = globalThis.fetch.bind(globalThis);
 let githubBootstrapInstalled = false;
 let currentCloudflareApiToken: string | undefined;
@@ -19,8 +26,62 @@ function delay(ms: number): Promise<void> {
 }
 
 function bindRuntimeCredentials(env: unknown): void {
-  const token = (env as { CLOUDFLARE_API_TOKEN?: unknown } | null)?.CLOUDFLARE_API_TOKEN;
+  const token = (env as BootstrapEnv | null)?.CLOUDFLARE_API_TOKEN;
   currentCloudflareApiToken = typeof token === 'string' && token.trim() ? token.trim() : undefined;
+}
+
+async function ensureFullPromptTable(env: BootstrapEnv): Promise<void> {
+  if (!env.DB) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS project_full_prompts (
+    project_id TEXT PRIMARY KEY,
+    prompt TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`).run();
+}
+
+async function storeFullPrompt(env: BootstrapEnv, projectId: string, prompt: string): Promise<void> {
+  if (!env.DB || !projectId || !prompt.trim()) return;
+  await ensureFullPromptTable(env);
+  const now = new Date().toISOString();
+  await env.DB.prepare(`INSERT INTO project_full_prompts (project_id, prompt, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(project_id) DO UPDATE SET prompt = excluded.prompt, updated_at = excluded.updated_at`)
+    .bind(projectId, prompt, now).run();
+  await env.DB.prepare('UPDATE projects SET prompt = ?, updated_at = ? WHERE id = ?')
+    .bind(prompt, now, projectId).run();
+}
+
+async function restoreFullPrompt(env: BootstrapEnv, projectId: string): Promise<void> {
+  if (!env.DB || !projectId) return;
+  await ensureFullPromptTable(env);
+  const row = await env.DB.prepare('SELECT prompt FROM project_full_prompts WHERE project_id = ?')
+    .bind(projectId).first<{ prompt?: string }>();
+  if (row?.prompt) {
+    await env.DB.prepare('UPDATE projects SET prompt = ? WHERE id = ?').bind(row.prompt, projectId).run();
+  }
+}
+
+async function captureProjectPrompt(request: Request, response: Response, env: BootstrapEnv): Promise<void> {
+  if (request.method !== 'POST' || !env.DB) return;
+  const url = new URL(request.url);
+  const isCreate = url.pathname === '/projects';
+  const projectAction = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/(build|reject)$/);
+  const isDuplicate = /^\/projects\/[0-9a-f-]{36}\/duplicate$/.test(url.pathname);
+  if (!isCreate && !projectAction && !isDuplicate) return;
+
+  let body: { prompt?: unknown } = {};
+  try { body = await request.clone().json() as { prompt?: unknown }; } catch {}
+  const prompt = typeof body.prompt === 'string' ? body.prompt : '';
+
+  let projectId = projectAction?.[1] || '';
+  if ((isCreate || isDuplicate) && response.ok) {
+    try {
+      const payload = await response.clone().json() as { project?: { id?: string } };
+      projectId = payload.project?.id || projectId;
+    } catch {}
+  }
+
+  if (projectId && prompt.trim()) await storeFullPrompt(env, projectId, prompt);
 }
 
 async function githubLogin(headers: Headers): Promise<string | null> {
@@ -257,11 +318,26 @@ export default {
   async fetch(request: Request, env: unknown): Promise<Response> {
     bindRuntimeCredentials(env);
     const module = await entry;
-    return module.default.fetch(request, env as never);
+    const response = await module.default.fetch(request, env as never);
+    try {
+      await captureProjectPrompt(request, response, env as BootstrapEnv);
+    } catch (error) {
+      console.warn(JSON.stringify({ event: 'full_prompt_capture_failed', reason: error instanceof Error ? error.message : String(error) }));
+    }
+    return response;
   },
 
   async queue(batch: MessageBatch<unknown>, env: unknown): Promise<void> {
     bindRuntimeCredentials(env);
+    const runtimeEnv = env as BootstrapEnv;
+    try {
+      for (const message of batch.messages) {
+        const body = message.body as BuildQueueBody;
+        if (body?.projectId) await restoreFullPrompt(runtimeEnv, body.projectId);
+      }
+    } catch (error) {
+      console.warn(JSON.stringify({ event: 'full_prompt_restore_failed', reason: error instanceof Error ? error.message : String(error) }));
+    }
     const module = await entry;
     return module.default.queue(batch as never, env as never);
   },
