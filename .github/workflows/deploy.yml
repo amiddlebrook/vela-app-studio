@@ -47,10 +47,6 @@ jobs:
             echo 'TOKEN_ENCRYPTION_KEY already configured.'
           fi
 
-          # Cloudflare OAuth is retained for user/account identity, but several
-          # Worker-management endpoints do not accept OAuth access tokens. The
-          # API token already used by this deployment is therefore synchronized
-          # into the Worker runtime for generated-app provisioning operations.
           if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
             PAYLOAD="$(jq -c --arg value "$CLOUDFLARE_API_TOKEN" '. + {CLOUDFLARE_API_TOKEN:$value}' <<<"$PAYLOAD")"
             echo 'Synchronizing CLOUDFLARE_API_TOKEN into Worker runtime secrets.'
@@ -121,7 +117,6 @@ jobs:
           ensure_column projects scaffolding_json "TEXT"
           ensure_column projects plan_json "TEXT"
 
-          # Idempotent migration files that were previously only marked as applied.
           $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0008_enterprise_schema.sql
           $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0009_workspace_settings.sql
 
@@ -136,60 +131,8 @@ jobs:
           set -euo pipefail
           npx --yes wrangler@4.126.0 deploy
 
-      - name: Repair generated workers.dev routes
-        shell: bash
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
-          scripts="$(curl -fsS "$API/scripts" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result[]?.id | select(startswith("vela-") and . != "vela-control-plane")')"
-          if [ -z "$scripts" ]; then
-            echo 'No generated Vela Workers require workers.dev route reconciliation.'
-          else
-            while IFS= read -r script; do
-              [ -n "$script" ] || continue
-              echo "Ensuring workers.dev route is enabled for $script"
-              curl -fsS -X POST "$API/scripts/$script/subdomain" \
-                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                -H 'content-type: application/json' \
-                --data '{"enabled":true,"previews_enabled":true}' >/dev/null
-            done <<<"$scripts"
-          fi
-
-      - name: Probe generated workers.dev routes
-        shell: bash
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers"
-          SUBDOMAIN='averymiddlebrook2014'
-          scripts="$(curl -fsS "$API/scripts" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.result[]?.id | select(startswith("vela-") and . != "vela-control-plane")')"
-          while IFS= read -r script; do
-            [ -n "$script" ] || continue
-            url="https://${script}.${SUBDOMAIN}.workers.dev/"
-            status='000'
-            for attempt in {1..5}; do
-              status="$(curl -sS -o /tmp/vela-generated-worker.out -w '%{http_code}' --max-time 15 "$url" || true)"
-              if [[ "$status" == 2* || "$status" == 3* ]]; then break; fi
-              sleep 2
-            done
-            echo "GENERATED_WORKER_PROBE script=$script status=$status url=$url"
-            if [[ "$status" != 2* && "$status" != 3* ]]; then
-              echo 'Response preview:'
-              head -c 800 /tmp/vela-generated-worker.out 2>/dev/null || true
-              echo
-            fi
-          done <<<"$scripts"
-
       - name: Runtime smoke test
         shell: bash
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           BASE='https://vela-control-plane.averymiddlebrook2014.workers.dev'
@@ -224,12 +167,9 @@ jobs:
 
           request session /tmp/vela-session.json -c /tmp/vela.cookies -X POST "$BASE/session"
           request connections /tmp/vela-connections.json -b /tmp/vela.cookies "$BASE/connections"
-          request projects /tmp/vela-projects.json -b /tmp/vela.cookies "$BASE/projects"
-          request create-project /tmp/vela-create.json -b /tmp/vela.cookies -X POST -H 'content-type: application/json' -d '{"name":"CI Smoke Test","prompt":"Build a minimal calculator smoke-test app"}' "$BASE/projects"
-
           node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-connections.json','utf8'));if(!Array.isArray(x.connections))throw new Error('connections payload invalid')"
-          node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-projects.json','utf8'));if(!Array.isArray(x.projects))throw new Error('projects payload invalid')"
-          SMOKE_ID="$(node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-create.json','utf8'));const id=x.project?.id;if(!/^[0-9a-f-]{36}$/.test(id||''))throw new Error('created project payload invalid');process.stdout.write(id)")"
 
-          npx --yes wrangler@4.126.0 d1 execute vela-control-plane --remote --yes --command "DELETE FROM build_events WHERE project_id = '$SMOKE_ID'; DELETE FROM project_features WHERE project_id = '$SMOKE_ID'; DELETE FROM usage_events WHERE project_id = '$SMOKE_ID'; DELETE FROM projects WHERE id = '$SMOKE_ID';"
-          echo 'Runtime smoke test passed, including project creation.'
+          # IMPORTANT: CI must never POST /projects or any build-triggering endpoint.
+          # Doing so enqueues real application builds and can create GitHub repos,
+          # D1 databases, and Cloudflare Workers after the smoke-test row is deleted.
+          echo 'Runtime smoke test passed without creating or deploying an application.'
