@@ -61,7 +61,7 @@ jobs:
             PAYLOAD="$(jq -c --arg value "$OPENROUTER_API_KEY" '. + {OPENROUTER_API_KEY:$value}' <<<"$PAYLOAD")"
             echo 'Installing OPENROUTER_API_KEY from GitHub Actions secret.'
           else
-            echo 'OPENROUTER_API_KEY is not configured; Cloudflare Workers AI will be used as the automatic fallback/primary provider.'
+            echo 'OPENROUTER_API_KEY is not configured; procedural builds will remain blocked until an OpenRouter key is configured.'
           fi
 
           if [ "$PAYLOAD" != '{}' ]; then
@@ -119,8 +119,9 @@ jobs:
 
           $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0008_enterprise_schema.sql
           $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0009_workspace_settings.sql
+          $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0010_agentic_builder.sql
 
-          $WRANGLER d1 execute "$DB" --remote --yes --command "INSERT OR IGNORE INTO d1_migrations(name) VALUES ('0001_control_plane.sql'), ('0002_oauth_connections.sql'), ('0003_build_events.sql'), ('0004_users.sql'), ('0005_scaffolding.sql'), ('0006_build_events_stage.sql'), ('0007_plan_json.sql'), ('0008_enterprise_schema.sql'), ('0009_workspace_settings.sql');"
+          $WRANGLER d1 execute "$DB" --remote --yes --command "INSERT OR IGNORE INTO d1_migrations(name) VALUES ('0001_control_plane.sql'), ('0002_oauth_connections.sql'), ('0003_build_events.sql'), ('0004_users.sql'), ('0005_scaffolding.sql'), ('0006_build_events_stage.sql'), ('0007_plan_json.sql'), ('0008_enterprise_schema.sql'), ('0009_workspace_settings.sql'), ('0010_agentic_builder.sql');"
 
       - name: Deploy Worker
         shell: bash
@@ -169,7 +170,5 @@ jobs:
           request connections /tmp/vela-connections.json -b /tmp/vela.cookies "$BASE/connections"
           node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-connections.json','utf8'));if(!Array.isArray(x.connections))throw new Error('connections payload invalid')"
 
-          # IMPORTANT: CI must never POST /projects or any build-triggering endpoint.
-          # Doing so enqueues real application builds and can create GitHub repos,
-          # D1 databases, and Cloudflare Workers after the smoke-test row is deleted.
+          # CI must never call /projects or another build-triggering endpoint.
           echo 'Runtime smoke test passed without creating or deploying an application.'
