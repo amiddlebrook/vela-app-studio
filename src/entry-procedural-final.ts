@@ -1,5 +1,5 @@
 import { BuildCoordinator } from './index';
-import { AGENT_RUNNER_V2 } from './agent-runner-v2';
+import { AGENT_RUNNER_V3 } from './agent-runner-v3';
 
 export { BuildCoordinator };
 
@@ -35,13 +35,13 @@ function transformGithubWrite(input: RequestInfo | URL, init?: RequestInit): Req
 
   try {
     const existing = decodeBase64(payload.content);
-    if (existing !== AGENT_RUNNER_V2) {
-      payload.content = encodeBase64(AGENT_RUNNER_V2);
-      console.warn(JSON.stringify({ event: 'procedural_runner_v2_forced', previous_chars: existing.length, replacement_chars: AGENT_RUNNER_V2.length }));
+    if (existing !== AGENT_RUNNER_V3) {
+      payload.content = encodeBase64(AGENT_RUNNER_V3);
+      console.warn(JSON.stringify({ event: 'procedural_runner_v3_forced', previous_chars: existing.length, replacement_chars: AGENT_RUNNER_V3.length }));
       return { ...init, body: JSON.stringify(payload) };
     }
   } catch {
-    payload.content = encodeBase64(AGENT_RUNNER_V2);
+    payload.content = encodeBase64(AGENT_RUNNER_V3);
     return { ...init, body: JSON.stringify(payload) };
   }
 
