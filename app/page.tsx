@@ -1,31 +1,8 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
-type Project = {
-  id: string;
-  name: string;
-  prompt: string;
-  status: string;
-  github_repository: string | null;
-  worker_name: string | null;
-  scaffolding_json: string | null;
-  plan_json: string | null;
-  created_at: string;
-  updated_at: string;
-  features: Array<{ feature: string; enabled: boolean }>;
-  latest_event: { kind: string; detail: string; stage: string; created_at: string } | null;
-};
-
-type AuditLog = {
-  id: string;
-  project_id: string | null;
-  action: string;
-  details: string | null;
-  ip_address: string | null;
-  created_at: string;
-};
-
+type Connection = { provider: string; status?: string };
 type WorkspaceSettings = {
   active_provider: string;
   openrouter_key?: string;
@@ -41,742 +18,253 @@ type WorkspaceSettings = {
   custom_key?: string;
   custom_model?: string;
 };
+type NodeDef = { id: string; name: string; group: string; icon: string; mode: 'oauth' | 'ai' | 'planned' | 'native' };
+type Link = { id: string; from: string; to: string; capabilities: string[] };
+
+const NODES: NodeDef[] = [
+  { id: 'github', name: 'GitHub', group: 'Build', icon: 'GH', mode: 'oauth' },
+  { id: 'cloudflare', name: 'Cloudflare', group: 'Build', icon: 'CF', mode: 'oauth' },
+  { id: 'google', name: 'Google', group: 'Google', icon: 'G', mode: 'oauth' },
+  { id: 'youtube', name: 'YouTube', group: 'Content', icon: 'YT', mode: 'planned' },
+  { id: 'stripe', name: 'Stripe', group: 'Commerce', icon: '$', mode: 'planned' },
+  { id: 'shopify', name: 'Shopify', group: 'Commerce', icon: 'S', mode: 'planned' },
+  { id: 'amazon', name: 'Amazon', group: 'Commerce', icon: 'A', mode: 'planned' },
+  { id: 'ebay', name: 'eBay', group: 'Commerce', icon: 'E', mode: 'planned' },
+  { id: 'walmart', name: 'Walmart', group: 'Commerce', icon: 'W', mode: 'planned' },
+  { id: 'reddit', name: 'Reddit', group: 'Content', icon: 'R', mode: 'planned' },
+  { id: 'tiktok', name: 'TikTok', group: 'Content', icon: 'T', mode: 'planned' },
+  { id: 'instagram', name: 'Instagram', group: 'Content', icon: 'IG', mode: 'planned' },
+  { id: 'gmail', name: 'Gmail', group: 'Google', icon: 'M', mode: 'planned' },
+  { id: 'drive', name: 'Drive', group: 'Google', icon: 'D', mode: 'planned' },
+  { id: 'sheets', name: 'Sheets', group: 'Google', icon: 'SH', mode: 'planned' },
+  { id: 'crawler', name: 'Web Crawler', group: 'Internet', icon: '◎', mode: 'native' },
+  { id: 'webhook', name: 'Webhook / API', group: 'Internet', icon: '↗', mode: 'native' },
+  { id: 'openrouter', name: 'OpenRouter', group: 'AI', icon: 'OR', mode: 'ai' },
+  { id: 'openai', name: 'OpenAI', group: 'AI', icon: 'AI', mode: 'ai' },
+  { id: 'anthropic', name: 'Anthropic', group: 'AI', icon: 'AN', mode: 'ai' },
+  { id: 'gemini', name: 'Gemini', group: 'AI', icon: 'GM', mode: 'ai' },
+  { id: 'workers-ai', name: 'Workers AI', group: 'AI', icon: 'CF', mode: 'ai' },
+  { id: 'custom-ai', name: 'Custom AI', group: 'AI', icon: '+', mode: 'ai' },
+];
+
+const CAPABILITIES = ['Observe', 'Analyze', 'Create', 'Modify', 'Execute'];
+const STORAGE_KEY = 'vela-universal-mesh-v1';
 
 export default function Home() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [activeProject, setActiveProject] = useState<Project | null>(null);
-  const [view, setView] = useState<'home' | 'apps' | 'activity' | 'audit' | 'toolbox'>('home');
-  const [prompt, setPrompt] = useState('');
-  const [appName, setAppName] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState('');
   const [connections, setConnections] = useState<Set<string>>(new Set());
-  const [usageCost, setUsageCost] = useState('$0.00');
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
-  const [selectedCode, setSelectedCode] = useState<{ frontend?: string; backend?: string; database?: string } | null>(null);
-  const [codeModalOpen, setCodeModalOpen] = useState(false);
-
-  // Settings State
   const [settings, setSettings] = useState<WorkspaceSettings>({
     active_provider: 'auto',
-    openrouter_model: 'anthropic/claude-3.5-sonnet',
-    openai_model: 'gpt-4o',
-    gemini_model: 'gemini-2.0-flash',
-    anthropic_model: 'claude-3-5-sonnet-20241022',
-    cf_ai_model: '@cf/meta/llama-3.3-70b-instruct',
+    openrouter_model: 'openai/gpt-oss-120b',
+    openai_model: 'gpt-5',
+    gemini_model: 'gemini-2.5-flash',
+    anthropic_model: 'claude-sonnet-4-20250514',
+    cf_ai_model: '@cf/meta/llama-3.1-8b-instruct-fast',
   });
-  const [testResult, setTestResult] = useState<string | null>(null);
-  const [testingAI, setTestingAI] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [links, setLinks] = useState<Link[]>([]);
+  const [capabilities, setCapabilities] = useState<string[]>(['Observe', 'Analyze']);
+  const [search, setSearch] = useState('');
+  const [group, setGroup] = useState('All');
+  const [panel, setPanel] = useState<'none' | 'ai' | 'planned' | 'native'>('none');
+  const [panelNode, setPanelNode] = useState<NodeDef | null>(null);
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [goal, setGoal] = useState('');
+  const [apiUrl, setApiUrl] = useState('');
 
   const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
     const res = await fetch(path, options);
-    const data = (await res.json()) as Record<string, unknown>;
-    if (!res.ok) throw new Error(String(data?.reason || data?.error || 'Request failed'));
-    return data as unknown as T;
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) throw new Error(String(data.reason || data.error || 'Request failed'));
+    return data as T;
   };
 
-  const syncWorkspace = async () => {
+  const refresh = async () => {
     try {
       await api('/session', { method: 'POST' });
-      const [connsRes, projsRes, usageRes, auditRes] = await Promise.all([
-        api<{ connections: Array<{ provider: string }> }>('/connections').catch(() => ({ connections: [] })),
-        api<{ projects: Project[] }>('/projects').catch(() => ({ projects: [] })),
-        api<{ estimated_cost_cents: number }>('/usage').catch(() => ({ estimated_cost_cents: 0 })),
-        api<{ audit_logs: AuditLog[] }>('/audit-logs').catch(() => ({ audit_logs: [] })),
+      const [connData, settingsData] = await Promise.all([
+        api<{ connections: Connection[] }>('/connections').catch(() => ({ connections: [] })),
+        api<WorkspaceSettings>('/settings').catch(() => settings),
       ]);
-
-      setConnections(new Set<string>((connsRes.connections || []).map((c) => c.provider)));
-      const projs: Project[] = projsRes.projects || [];
-      setProjects(projs);
-      setActiveProject((prev) => {
-        if (!prev && projs.length > 0) return projs[0];
-        if (prev) return projs.find((p) => p.id === prev.id) || prev;
-        return null;
-      });
-      setUsageCost(`$${((usageRes.estimated_cost_cents || 0) / 100).toFixed(2)}`);
-      setAuditLogs(auditRes.audit_logs || []);
-    } catch (e) {
-      console.warn('Sync warning:', e);
-    }
-  };
-
-  const loadSettings = async () => {
-    try {
-      const data = await api<WorkspaceSettings>('/settings');
-      setSettings(data);
-    } catch (e) {
-      console.warn('Settings load warning:', e);
-    }
-  };
-
-  const saveSettings = async () => {
-    try {
-      setNote('Saving AI Toolbox settings...');
-      await api('/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
-      });
-      setNote('AI Toolbox settings saved successfully.');
-    } catch (err: unknown) {
-      setNote(err instanceof Error ? err.message : 'Save settings failed');
-    }
-  };
-
-  const handleTestAI = async () => {
-    setTestingAI(true);
-    setTestResult('Testing active AI model generation...');
-    try {
-      const res = await api<{ ok: boolean; latency_ms: number; response: string }>('/settings/test-llm', { method: 'POST' });
-      setTestResult(`✓ Operational (${res.latency_ms}ms): "${res.response}"`);
-    } catch (err: unknown) {
-      setTestResult(`✕ Test failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    } finally {
-      setTestingAI(false);
+      setConnections(new Set((connData.connections || []).filter(c => c.status !== 'disconnected').map(c => c.provider)));
+      setSettings(settingsData);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not load workspace');
     }
   };
 
   useEffect(() => {
-    let mounted = true;
-    const poll = async () => {
-      try {
-        await api('/session', { method: 'POST' });
-        const [connsRes, projsRes, usageRes, auditRes] = await Promise.all([
-          api<{ connections: Array<{ provider: string }> }>('/connections').catch(() => ({ connections: [] })),
-          api<{ projects: Project[] }>('/projects').catch(() => ({ projects: [] })),
-          api<{ estimated_cost_cents: number }>('/usage').catch(() => ({ estimated_cost_cents: 0 })),
-          api<{ audit_logs: AuditLog[] }>('/audit-logs').catch(() => ({ audit_logs: [] })),
-        ]);
-
-        if (!mounted) return;
-        setConnections(new Set<string>((connsRes.connections || []).map((c) => c.provider)));
-        const projs: Project[] = projsRes.projects || [];
-        setProjects(projs);
-        setActiveProject((prev) => {
-          if (!prev && projs.length > 0) return projs[0];
-          if (prev) return projs.find((p) => p.id === prev.id) || prev;
-          return null;
-        });
-        setUsageCost(`$${((usageRes.estimated_cost_cents || 0) / 100).toFixed(2)}`);
-        setAuditLogs(auditRes.audit_logs || []);
-      } catch (e) {
-        console.warn('Sync warning:', e);
+    void refresh();
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { links?: Link[]; goal?: string };
+        setLinks(Array.isArray(parsed.links) ? parsed.links : []);
+        setGoal(parsed.goal || '');
       }
-    };
-
-    void poll();
-    const interval = setInterval(poll, 3000);
-    return () => {
-      mounted = false;
-      clearInterval(interval);
-    };
+    } catch {}
   }, []);
 
-  const handleCreate = async () => {
-    if (!prompt.trim()) {
-      setNote('Please enter a description for your application.');
+  useEffect(() => {
+    try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ links, goal })); } catch {}
+  }, [links, goal]);
+
+  const groups = useMemo(() => ['All', ...Array.from(new Set(NODES.map(n => n.group)))], []);
+  const visibleNodes = useMemo(() => NODES.filter(n =>
+    (group === 'All' || n.group === group) &&
+    (!search.trim() || `${n.name} ${n.group}`.toLowerCase().includes(search.toLowerCase()))
+  ), [group, search]);
+
+  const aiConnected = (id: string) => {
+    if (id === 'workers-ai') return true;
+    if (id === 'openrouter') return Boolean(settings.openrouter_key && !settings.openrouter_key.includes('••'));
+    if (id === 'openai') return Boolean(settings.openai_key && !settings.openai_key.includes('••'));
+    if (id === 'anthropic') return Boolean(settings.anthropic_key && !settings.anthropic_key.includes('••'));
+    if (id === 'gemini') return Boolean(settings.gemini_key && !settings.gemini_key.includes('••'));
+    if (id === 'custom-ai') return Boolean(settings.custom_endpoint);
+    return false;
+  };
+
+  const isConnected = (node: NodeDef) => node.mode === 'oauth' ? connections.has(node.id) : node.mode === 'ai' ? aiConnected(node.id) : node.mode === 'native';
+
+  const clickNode = (node: NodeDef) => {
+    if (!isConnected(node)) {
+      setPanelNode(node);
+      if (node.mode === 'oauth') {
+        window.location.href = `/auth/${node.id}/start`;
+        return;
+      }
+      setPanel(node.mode === 'ai' ? 'ai' : node.mode === 'native' ? 'native' : 'planned');
       return;
     }
+    setSelected(prev => {
+      if (prev.includes(node.id)) return prev.filter(x => x !== node.id);
+      if (prev.length < 2) return [...prev, node.id];
+      return [prev[1], node.id];
+    });
+  };
+
+  const addLink = () => {
+    if (selected.length !== 2) return;
+    const [from, to] = selected;
+    if (from === to) return;
+    const existing = links.some(l => l.from === from && l.to === to);
+    if (!existing) setLinks(prev => [...prev, { id: crypto.randomUUID(), from, to, capabilities }]);
+    setSelected([]);
+  };
+
+  const saveAI = async () => {
     setBusy(true);
-    setNote('Generating enterprise architecture plan, D1 schema, and security matrix...');
     try {
-      const name = appName.trim() || prompt.trim().split(' ').slice(0, 3).join(' ');
-      const res = await api<{ project: Project }>('/projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, prompt }),
+      await api('/settings', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(settings),
       });
-      setPrompt('');
-      setAppName('');
-      setNote(`Architecture planned for ${res.project.name}. Review and approve below.`);
-      await syncWorkspace();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Creation failed';
-      setNote(msg);
-    } finally {
-      setBusy(false);
-    }
+      setNotice('AI provider settings saved.');
+      setPanel('none');
+      await refresh();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Could not save AI settings');
+    } finally { setBusy(false); }
   };
 
-  const handleApprove = async (id: string) => {
+  const testAI = async () => {
+    setBusy(true);
     try {
-      setNote('Approving plan — generating full-stack code, GitHub repository, and Cloudflare Worker...');
-      await api(`/projects/${id}/approve`, { method: 'POST' });
-      await syncWorkspace();
-    } catch (err: unknown) {
-      setNote(err instanceof Error ? err.message : 'Approval failed');
-    }
+      const result = await api<{ response: string; latency_ms: number }>('/settings/test-llm', { method: 'POST' });
+      setNotice(`AI operational · ${result.latency_ms}ms · ${result.response}`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'AI test failed'); }
+    finally { setBusy(false); }
   };
 
-  const handleReject = async (id: string) => {
-    const revised = window.prompt('Enter your revised requirements:');
-    if (!revised) return;
-    try {
-      setNote('Regenerating architecture with revised prompt...');
-      await api(`/projects/${id}/reject`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: revised }),
-      });
-      await syncWorkspace();
-    } catch (err: unknown) {
-      setNote(err instanceof Error ? err.message : 'Rejection failed');
-    }
-  };
-
-  const handleDelete = async (id: string, name: string) => {
-    if (!window.confirm(`Are you sure you want to delete build "${name}"? This action cannot be undone.`)) return;
-    try {
-      setNote(`Deleting build "${name}"...`);
-      await api(`/projects/${id}`, { method: 'DELETE' });
-      setNote(`Build "${name}" deleted.`);
-      await syncWorkspace();
-    } catch (err: unknown) {
-      setNote(err instanceof Error ? err.message : 'Delete failed');
-    }
-  };
-
-  const viewCode = async (id: string) => {
-    try {
-      const data = await api<{ frontend?: string; backend?: string; database?: string }>(`/projects/${id}/code`);
-      setSelectedCode(data);
-      setCodeModalOpen(true);
-    } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'Failed to load code');
-    }
-  };
+  const nodeName = (id: string) => NODES.find(n => n.id === id)?.name || id;
 
   return (
-    <main className="shell">
-      <div className="orb one" />
-      <div className="orb two" />
+    <main style={{minHeight:'100vh',background:'#07090d',color:'#f5f7fb',fontFamily:'Inter,ui-sans-serif,system-ui,sans-serif'}}>
+      <header style={{position:'sticky',top:0,zIndex:20,display:'flex',gap:16,alignItems:'center',justifyContent:'space-between',padding:'14px 20px',borderBottom:'1px solid #222834',background:'rgba(7,9,13,.94)',backdropFilter:'blur(14px)'}}>
+        <div><div style={{fontWeight:900,fontSize:20,letterSpacing:'-.04em'}}>VELA</div><div style={{fontSize:11,color:'#8c96a8'}}>UNIVERSAL CONNECTION MESH</div></div>
+        <div style={{display:'flex',gap:8,alignItems:'center'}}><span style={{fontSize:12,color:'#8c96a8'}}>{links.length} links</span><button onClick={() => {setLinks([]);setSelected([])}} style={ghost}>Clear mesh</button></div>
+      </header>
 
-      {/* Sidebar */}
-      <aside>
-        <button className="logo" onClick={() => setView('home')}>
-          <b>v</b>vela
-        </button>
-        <div className="space">
-          <i>A</i>
-          <span>Avery&apos;s Space</span>
-          <b>⌄</b>
+      <div style={{maxWidth:1320,margin:'0 auto',padding:'22px'}}>
+        <section style={{display:'grid',gridTemplateColumns:'minmax(0,1fr)',gap:16,marginBottom:18}}>
+          <div style={{padding:'22px',border:'1px solid #222834',borderRadius:18,background:'#0d1118'}}>
+            <div style={{fontSize:12,color:'#70d7ff',fontWeight:800,letterSpacing:'.08em'}}>THE USER EXPERIENCE</div>
+            <h1 style={{fontSize:'clamp(28px,5vw,56px)',lineHeight:1,letterSpacing:'-.06em',margin:'8px 0 10px'}}>Click things together.</h1>
+            <p style={{maxWidth:760,color:'#9aa5b8',lineHeight:1.6,margin:0}}>Connect the services you use. Click one, click another, choose how much authority the connection gets. Vela handles the workflow machinery underneath.</p>
+            <textarea value={goal} onChange={e=>setGoal(e.target.value)} placeholder="Optional goal: e.g. Grow my YouTube channel, run my ecommerce business, build and deploy apps..." style={{width:'100%',boxSizing:'border-box',marginTop:16,minHeight:76,resize:'vertical',background:'#080b10',border:'1px solid #2a3240',borderRadius:12,padding:13,color:'#fff',fontSize:15}} />
+          </div>
+        </section>
+
+        {notice && <div style={{marginBottom:16,padding:'11px 13px',border:'1px solid #304055',borderRadius:12,background:'#0d1721',color:'#b9e8ff',fontSize:13}}>{notice}</div>}
+
+        <section style={{display:'grid',gridTemplateColumns:'minmax(0,1fr)',gap:16}}>
+          <div style={{border:'1px solid #222834',borderRadius:18,background:'#0b0e14',padding:16}}>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12}}>
+              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search anything..." style={{flex:'1 1 220px',minHeight:44,background:'#080b10',border:'1px solid #29313e',borderRadius:10,padding:'0 12px',color:'#fff',fontSize:16}} />
+              <select value={group} onChange={e=>setGroup(e.target.value)} style={{minHeight:44,background:'#080b10',border:'1px solid #29313e',borderRadius:10,padding:'0 12px',color:'#fff',fontSize:15}}>{groups.map(g=><option key={g}>{g}</option>)}</select>
+            </div>
+
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(142px,1fr))',gap:10}}>
+              {visibleNodes.map(node => {
+                const connected = isConnected(node);
+                const chosen = selected.includes(node.id);
+                return <button key={node.id} onClick={()=>clickNode(node)} style={{textAlign:'left',minHeight:88,padding:12,borderRadius:14,border:`1px solid ${chosen?'#69d5ff':connected?'#2f5b4a':'#29313e'}`,background:chosen?'#102330':connected?'#0d1915':'#0c1016',color:'#fff',cursor:'pointer'}}>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}><span style={{display:'grid',placeItems:'center',width:34,height:34,borderRadius:9,background:'#161c26',fontWeight:900,fontSize:12}}>{node.icon}</span><span style={{fontSize:10,color:connected?'#77ddb1':'#7f8998'}}>{connected?'READY':node.mode==='planned'?'NEXT':'CONNECT'}</span></div>
+                  <div style={{fontWeight:750,marginTop:8}}>{node.name}</div><div style={{fontSize:11,color:'#7f8998',marginTop:2}}>{node.group}</div>
+                </button>;
+              })}
+            </div>
+          </div>
+
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(280px,1fr))',gap:16}}>
+            <div style={{border:'1px solid #222834',borderRadius:18,background:'#0b0e14',padding:16}}>
+              <div style={eyebrow}>CREATE CONNECTION</div>
+              <div style={{fontSize:20,fontWeight:800,margin:'6px 0 12px'}}>{selected.length === 2 ? `${nodeName(selected[0])} → ${nodeName(selected[1])}` : selected.length === 1 ? `${nodeName(selected[0])} → click another thing` : 'Click two ready things'}</div>
+              <div style={{display:'flex',gap:7,flexWrap:'wrap'}}>{CAPABILITIES.map(cap => <button key={cap} onClick={()=>setCapabilities(prev=>prev.includes(cap)?prev.filter(x=>x!==cap):[...prev,cap])} style={{...chip,background:capabilities.includes(cap)?'#153346':'#11161f',borderColor:capabilities.includes(cap)?'#3f9fc9':'#29313e'}}>{cap}</button>)}</div>
+              <button disabled={selected.length!==2 || capabilities.length===0} onClick={addLink} style={{...primary,width:'100%',marginTop:14,opacity:selected.length===2&&capabilities.length?1:.45}}>Connect them</button>
+            </div>
+
+            <div style={{border:'1px solid #222834',borderRadius:18,background:'#0b0e14',padding:16}}>
+              <div style={eyebrow}>AUTHORITY MODEL</div>
+              <p style={{fontSize:13,color:'#919cad',lineHeight:1.55}}>Connections start conservative. Observe and Analyze are safe defaults. Create, Modify and Execute are explicit authority.</p>
+              <div style={{display:'grid',gap:6,fontSize:12,color:'#aab3c2'}}>{CAPABILITIES.map((c,i)=><div key={c} style={{display:'flex',justifyContent:'space-between',borderBottom:'1px solid #1b2029',padding:'7px 0'}}><span>{c}</span><span style={{color:i<2?'#72dfb0':'#727e90'}}>{i<2?'LOW RISK':'USER GRANT'}</span></div>)}</div>
+            </div>
+          </div>
+
+          <div style={{border:'1px solid #222834',borderRadius:18,background:'#0b0e14',padding:16}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,marginBottom:10}}><div><div style={eyebrow}>ACTIVE MESH</div><div style={{fontWeight:800,fontSize:20,marginTop:4}}>What is connected to what</div></div><span style={{fontSize:12,color:'#7f8998'}}>{links.length} total</span></div>
+            {!links.length ? <div style={{padding:'28px 0',textAlign:'center',color:'#707b8c'}}>Nothing connected yet. Click two ready services above.</div> : <div style={{display:'grid',gap:8}}>{links.map(link=><div key={link.id} style={{display:'grid',gridTemplateColumns:'1fr auto',gap:10,alignItems:'center',padding:12,border:'1px solid #252d39',borderRadius:12,background:'#0d1118'}}><div><div style={{fontWeight:800}}>{nodeName(link.from)} <span style={{color:'#58c6f3'}}>→</span> {nodeName(link.to)}</div><div style={{display:'flex',gap:5,flexWrap:'wrap',marginTop:7}}>{link.capabilities.map(c=><span key={c} style={{fontSize:10,padding:'3px 7px',border:'1px solid #2b3644',borderRadius:999,color:'#9da8b9'}}>{c}</span>)}</div></div><button onClick={()=>setLinks(prev=>prev.filter(x=>x.id!==link.id))} style={ghost}>Remove</button></div>)}</div>}
+          </div>
+        </section>
+      </div>
+
+      {panel !== 'none' && <div style={{position:'fixed',inset:0,zIndex:50,background:'rgba(0,0,0,.72)',display:'grid',placeItems:'center',padding:16}} onMouseDown={e=>{if(e.target===e.currentTarget)setPanel('none')}}>
+        <div style={{width:'min(620px,100%)',maxHeight:'86vh',overflowY:'auto',background:'#0c1016',border:'1px solid #303947',borderRadius:18,padding:20}}>
+          <div style={{display:'flex',justifyContent:'space-between',gap:12,alignItems:'center'}}><div><div style={eyebrow}>{panelNode?.group}</div><h2 style={{margin:'4px 0 0',fontSize:24}}>{panelNode?.name}</h2></div><button onClick={()=>setPanel('none')} style={ghost}>Close</button></div>
+
+          {panel === 'planned' && <div style={{marginTop:18}}><p style={{color:'#a2adbd',lineHeight:1.6}}>This connector is represented in the mesh now, but its production OAuth/API adapter is not wired into this Worker yet. It will use the same click-to-connect model when its adapter lands.</p><div style={{padding:12,border:'1px solid #27313e',borderRadius:12,color:'#7edcb2',fontSize:13}}>Connector slot reserved: {panelNode?.name}</div></div>}
+
+          {panel === 'native' && <div style={{marginTop:18}}><label style={label}>HTTP(S) endpoint or site</label><input value={apiUrl} onChange={e=>setApiUrl(e.target.value)} placeholder="https://example.com/api or https://example.com" style={input}/><p style={{fontSize:12,color:'#7f8998'}}>Native crawler/API nodes are available in the mesh. Production execution will enforce HTTPS, public-network targets, rate limits and bounded crawl depth.</p><button onClick={()=>{setNotice(`${panelNode?.name} node ready for ${apiUrl || 'configuration'}.`);setPanel('none')}} style={{...primary,width:'100%'}}>Add node</button></div>}
+
+          {panel === 'ai' && <div style={{marginTop:18,display:'grid',gap:12}}>
+            <label style={label}>Active provider</label><select value={settings.active_provider} onChange={e=>setSettings({...settings,active_provider:e.target.value})} style={input}><option value="auto">Auto</option><option value="cloudflare">Workers AI</option><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="custom">Custom OpenAI-compatible</option></select>
+            <label style={label}>OpenRouter API key</label><input type="password" value={settings.openrouter_key||''} onChange={e=>setSettings({...settings,openrouter_key:e.target.value})} style={input}/><input value={settings.openrouter_model} onChange={e=>setSettings({...settings,openrouter_model:e.target.value})} placeholder="OpenRouter model" style={input}/>
+            <label style={label}>OpenAI API key</label><input type="password" value={settings.openai_key||''} onChange={e=>setSettings({...settings,openai_key:e.target.value})} style={input}/><input value={settings.openai_model} onChange={e=>setSettings({...settings,openai_model:e.target.value})} placeholder="OpenAI model" style={input}/>
+            <label style={label}>Anthropic API key</label><input type="password" value={settings.anthropic_key||''} onChange={e=>setSettings({...settings,anthropic_key:e.target.value})} style={input}/><input value={settings.anthropic_model} onChange={e=>setSettings({...settings,anthropic_model:e.target.value})} placeholder="Anthropic model" style={input}/>
+            <label style={label}>Gemini API key</label><input type="password" value={settings.gemini_key||''} onChange={e=>setSettings({...settings,gemini_key:e.target.value})} style={input}/><input value={settings.gemini_model} onChange={e=>setSettings({...settings,gemini_model:e.target.value})} placeholder="Gemini model" style={input}/>
+            <label style={label}>Workers AI model</label><input value={settings.cf_ai_model} onChange={e=>setSettings({...settings,cf_ai_model:e.target.value})} style={input}/>
+            <label style={label}>Custom AI endpoint</label><input value={settings.custom_endpoint||''} onChange={e=>setSettings({...settings,custom_endpoint:e.target.value})} placeholder="https://.../v1/chat/completions" style={input}/><input type="password" value={settings.custom_key||''} onChange={e=>setSettings({...settings,custom_key:e.target.value})} placeholder="API key" style={input}/><input value={settings.custom_model||''} onChange={e=>setSettings({...settings,custom_model:e.target.value})} placeholder="Model" style={input}/>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button disabled={busy} onClick={saveAI} style={{...primary,flex:1}}>Save AI connections</button><button disabled={busy} onClick={testAI} style={{...ghost,flex:1}}>Test active AI</button></div>
+          </div>}
         </div>
-        <nav>
-          <Nav label="⌂" text="Overview" active={view === 'home'} onClick={() => setView('home')} />
-          <Nav label="◫" text={`Apps (${projects.length})`} active={view === 'apps'} onClick={() => setView('apps')} />
-          <Nav label="⚡" text="AI Toolbox" active={view === 'toolbox'} onClick={() => { setView('toolbox'); loadSettings(); }} />
-          <Nav label="⌁" text="Activity" active={view === 'activity'} onClick={() => setView('activity')} />
-          <Nav label="🛡" text="Audit & Compliance" active={view === 'audit'} onClick={() => setView('audit')} />
-        </nav>
-        <div className="lower">
-          <Nav label="◈" text={`Usage · ${usageCost}`} onClick={() => setView('apps')} />
-          <div className="user">
-            <i>A</i>
-            <span>
-              <b>Avery</b>
-              <small>amiddlebrook (Owner)</small>
-            </span>
-          </div>
-        </div>
-      </aside>
-
-      {/* Main Content */}
-      <section className="content">
-        <header>
-          <div>
-            <small>
-              {view === 'home'
-                ? 'ENTERPRISE APP STUDIO'
-                : view === 'apps'
-                ? 'APPLICATION PORTFOLIO'
-                : view === 'toolbox'
-                ? 'AI PROVIDER TOOLBOX'
-                : view === 'audit'
-                ? 'SECURITY & AUDIT'
-                : 'BUILD PIPELINE'}
-            </small>
-            <h1>
-              {view === 'home'
-                ? 'What will you architect today?'
-                : view === 'apps'
-                ? 'Enterprise Edge Portfolio'
-                : view === 'toolbox'
-                ? 'Manageable AI Providers & Models'
-                : view === 'audit'
-                ? 'Compliance & Audit Log'
-                : 'Real-Time Edge Telemetry'}
-            </h1>
-          </div>
-          <div className="header-actions">
-            <button
-              className="connected"
-              onClick={() => (window.location.href = connections.has('github') ? '#' : '/auth/github/start')}
-            >
-              GitHub {connections.has('github') ? '✓' : '⟳ Connect'}
-            </button>
-            <button
-              className="connected"
-              onClick={() => (window.location.href = connections.has('cloudflare') ? '#' : '/auth/cloudflare/start')}
-            >
-              Cloudflare {connections.has('cloudflare') ? '✓' : '⟳ Connect'}
-            </button>
-          </div>
-        </header>
-
-        {/* Home / Studio View */}
-        {view === 'home' && (
-          <>
-            <section className="hero">
-              <div className="copy">
-                <small>✦ &nbsp; AUTONOMOUS EDGE BUILDER</small>
-                <h2>Describe it once. Vela builds it right.</h2>
-                <p>
-                  Zero clarification hurdles. Generates complete React frontends, Cloudflare Worker REST APIs,
-                  D1 SQLite schemas, and deploys to production under your GitHub account.
-                </p>
-              </div>
-              <div className="composer">
-                <input
-                  type="text"
-                  placeholder="Optional App Name (e.g. Operations Control Portal)"
-                  value={appName}
-                  onChange={(e) => setAppName(e.target.value)}
-                  style={{
-                    width: '100%',
-                    border: 0,
-                    outline: 0,
-                    fontSize: '13px',
-                    fontWeight: 600,
-                    marginBottom: '8px',
-                    color: '#141e2b',
-                  }}
-                />
-                <textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  onKeyDown={(e) => {
-                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') handleCreate();
-                  }}
-                  placeholder="Describe the application, target workflows, security posture, and data model..."
-                />
-                <div>
-                  <span>
-                    <kbd>⌘</kbd>
-                    <kbd>↵</kbd> to architect
-                  </span>
-                  <button onClick={handleCreate} disabled={busy}>
-                    {busy ? 'Planning...' : 'Generate Plan ↗'}
-                  </button>
-                </div>
-              </div>
-            </section>
-
-            {note && <p className="note" style={{ margin: '16px 0', padding: '10px 14px', background: '#eef3ff', borderRadius: '10px' }}>✦ {note}</p>}
-
-            <Section title="Active Applications" action={() => setView('apps')} />
-            <div className="cards">
-              {projects.slice(0, 6).map((p) => (
-                <article className="card" key={p.id}>
-                  <div className="cardtop">
-                    <span className="mark blue">{p.name[0]}</span>
-                    <button onClick={() => { setActiveProject(p); setView('apps'); }}>↗</button>
-                  </div>
-                  <div className="scene"><i/><i/><i/></div>
-                  <div className="meta">
-                    <div>
-                      <h3>{p.name}</h3>
-                      <p>{p.status.replace('_', ' ')}</p>
-                    </div>
-                    <span className={`badge ${p.status === 'live' ? 'live' : ''}`}>● {p.status}</span>
-                  </div>
-                  {p.status === 'awaiting_approval' && (
-                    <div style={{ marginTop: '12px', display: 'flex', gap: '6px' }}>
-                      <button
-                        onClick={() => handleApprove(p.id)}
-                        style={{ flex: 1, padding: '6px 0', fontSize: '11px', fontWeight: 700, background: '#4262ff', color: '#fff', border: 0, borderRadius: '8px' }}
-                      >
-                        Approve Plan
-                      </button>
-                      <button
-                        onClick={() => handleReject(p.id)}
-                        style={{ padding: '6px 10px', fontSize: '11px', background: '#e7e8eb', border: 0, borderRadius: '8px' }}
-                      >
-                        Revise
-                      </button>
-                    </div>
-                  )}
-                  <footer>
-                    <span>{usageCost}<small>monthly</small></span>
-                    <button
-                      onClick={() => handleDelete(p.id, p.name)}
-                      style={{ background: 'none', border: 0, color: '#f87171', fontSize: '11px', cursor: 'pointer', fontWeight: 600 }}
-                    >
-                      Delete 🗑
-                    </button>
-                  </footer>
-                </article>
-              ))}
-              {projects.length === 0 && (
-                <div style={{ gridColumn: '1 / -1', padding: '40px', textAlign: 'center', background: '#fff', borderRadius: '16px', border: '1px solid #e7e8eb', color: '#788091' }}>
-                  No applications created yet. Use the composer above to start planning.
-                </div>
-              )}
-            </div>
-          </>
-        )}
-
-        {/* AI Toolbox View */}
-        {view === 'toolbox' && (
-          <section className="portfolio" style={{ maxWidth: '800px' }}>
-            <div style={{ background: '#fff', border: '1px solid #e7e8eb', borderRadius: '16px', padding: '24px', width: '100%' }}>
-              <h2 style={{ fontSize: '18px', fontWeight: 800, marginBottom: '6px' }}>AI Provider &amp; Model Toolbox</h2>
-              <p style={{ fontSize: '13px', color: '#788091', marginBottom: '20px' }}>
-                Configure and test multi-provider LLMs. Easily toggle between Cloudflare Workers AI, OpenRouter, OpenAI, and custom endpoints.
-              </p>
-
-              <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, marginBottom: '4px' }}>PRIMARY AI ROUTING</label>
-                <select
-                  value={settings.active_provider}
-                  onChange={(e) => setSettings({ ...settings, active_provider: e.target.value })}
-                  style={{ width: '100%', padding: '10px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
-                >
-                  <option value="auto">Auto (Failover: Custom → OpenRouter → Cloudflare AI → OpenAI → Gemini)</option>
-                  <option value="cloudflare">Cloudflare Workers AI (Edge Native)</option>
-                  <option value="openrouter">OpenRouter (Multi-Model Hub)</option>
-                  <option value="openai">OpenAI (GPT-4o / o3-mini)</option>
-                  <option value="gemini">Google Gemini (Gemini 2.0 Flash / Pro)</option>
-                  <option value="anthropic">Anthropic Claude (Claude 3.5 Sonnet)</option>
-                  <option value="custom">Custom Endpoint (Ollama, vLLM, Groq)</option>
-                </select>
-              </div>
-
-              <hr style={{ border: 0, borderTop: '1px solid #e5e7eb', margin: '20px 0' }} />
-
-              <h3 style={{ fontSize: '14px', fontWeight: 800, marginBottom: '10px' }}>Cloudflare Workers AI</h3>
-              <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>MODEL ID</label>
-                <input
-                  type="text"
-                  value={settings.cf_ai_model}
-                  onChange={(e) => setSettings({ ...settings, cf_ai_model: e.target.value })}
-                  placeholder="@cf/meta/llama-3.3-70b-instruct"
-                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
-                />
-              </div>
-
-              <hr style={{ border: 0, borderTop: '1px solid #e5e7eb', margin: '20px 0' }} />
-
-              <h3 style={{ fontSize: '14px', fontWeight: 800, marginBottom: '10px' }}>OpenRouter Integration</h3>
-              <div style={{ marginBottom: '10px' }}>
-                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>API KEY</label>
-                <input
-                  type="password"
-                  value={settings.openrouter_key || ''}
-                  onChange={(e) => setSettings({ ...settings, openrouter_key: e.target.value })}
-                  placeholder="sk-or-v1-..."
-                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
-                />
-              </div>
-              <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>MODEL</label>
-                <input
-                  type="text"
-                  value={settings.openrouter_model}
-                  onChange={(e) => setSettings({ ...settings, openrouter_model: e.target.value })}
-                  placeholder="anthropic/claude-3.5-sonnet"
-                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
-                />
-              </div>
-
-              <hr style={{ border: 0, borderTop: '1px solid #e5e7eb', margin: '20px 0' }} />
-
-              <h3 style={{ fontSize: '14px', fontWeight: 800, marginBottom: '10px' }}>Custom Endpoint (Ollama / Local / Groq)</h3>
-              <div style={{ marginBottom: '10px' }}>
-                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>BASE URL</label>
-                <input
-                  type="text"
-                  value={settings.custom_endpoint || ''}
-                  onChange={(e) => setSettings({ ...settings, custom_endpoint: e.target.value })}
-                  placeholder="http://localhost:11434/v1"
-                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
-                />
-              </div>
-              <div style={{ marginBottom: '10px' }}>
-                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>API KEY (Optional)</label>
-                <input
-                  type="password"
-                  value={settings.custom_key || ''}
-                  onChange={(e) => setSettings({ ...settings, custom_key: e.target.value })}
-                  placeholder="Bearer token"
-                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
-                />
-              </div>
-              <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>MODEL NAME</label>
-                <input
-                  type="text"
-                  value={settings.custom_model || ''}
-                  onChange={(e) => setSettings({ ...settings, custom_model: e.target.value })}
-                  placeholder="llama3.3"
-                  style={{ width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '13px' }}
-                />
-              </div>
-
-              <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
-                <button
-                  onClick={saveSettings}
-                  style={{ padding: '10px 18px', background: '#4262ff', color: '#fff', border: 0, borderRadius: '8px', fontSize: '12px', fontWeight: 700, cursor: 'pointer' }}
-                >
-                  Save Settings
-                </button>
-                <button
-                  onClick={handleTestAI}
-                  disabled={testingAI}
-                  style={{ padding: '10px 18px', background: '#f3f4f6', color: '#374151', border: '1px solid #d1d5db', borderRadius: '8px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}
-                >
-                  {testingAI ? 'Testing...' : 'Test Active AI Provider ⚡'}
-                </button>
-              </div>
-
-              {testResult && (
-                <div style={{ marginTop: '14px', padding: '10px 14px', borderRadius: '8px', fontSize: '12px', background: testResult.startsWith('✓') ? '#ecfdf5' : '#fef2f2', color: testResult.startsWith('✓') ? '#047857' : '#b91c1c' }}>
-                  {testResult}
-                </div>
-              )}
-            </div>
-          </section>
-        )}
-
-        {/* Portfolio / App Detail View */}
-        {view === 'apps' && (
-          <section className="portfolio">
-            <div className="list">
-              <Section title="Your Edge Applications" action={() => setView('home')} />
-              {projects.map((p) => (
-                <button
-                  key={p.id}
-                  className={`row ${activeProject?.id === p.id ? 'chosen' : ''}`}
-                  onClick={() => setActiveProject(p)}
-                >
-                  <span className="mark blue">{p.name[0]}</span>
-                  <span>
-                    <b>{p.name}</b>
-                    <small>
-                      <i className={p.status === 'live' ? 'live' : ''} /> {p.status.replace('_', ' ')}
-                    </small>
-                  </span>
-                  <b>→</b>
-                </button>
-              ))}
-            </div>
-
-            {activeProject && (
-              <div className="panel">
-                <small>CONTROL PLANE</small>
-                <div className="title">
-                  <span className="mark big blue">{activeProject.name[0]}</span>
-                  <div>
-                    <h2>{activeProject.name}</h2>
-                    <p>{activeProject.prompt.slice(0, 70)}...</p>
-                  </div>
-                </div>
-
-                <div className="livebar">
-                  <span>● STATUS: {activeProject.status.toUpperCase()}</span>
-                  {activeProject.worker_name && activeProject.status === 'live' && (
-                    <a
-                      href={`https://${activeProject.worker_name}.workers.dev`}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ color: '#6e9221', fontWeight: 800, textDecoration: 'none' }}
-                    >
-                      Open Live ↗
-                    </a>
-                  )}
-                </div>
-
-                {activeProject.status === 'awaiting_approval' && activeProject.plan_json && (
-                  <div style={{ margin: '18px 0', padding: '14px', background: '#f6f8ff', borderRadius: '12px', border: '1px solid #dce4ff' }}>
-                    <div style={{ fontSize: '11px', fontWeight: 800, color: '#4262ff', textTransform: 'uppercase' }}>
-                      Architecture Blueprint Ready
-                    </div>
-                    <p style={{ fontSize: '12px', color: '#4d5561', marginTop: '4px' }}>
-                      Security matrix, D1 schema, and Cloudflare Worker routes generated.
-                    </p>
-                    <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
-                      <button
-                        onClick={() => handleApprove(activeProject.id)}
-                        style={{ padding: '8px 14px', background: '#4262ff', color: '#fff', border: 0, borderRadius: '8px', fontSize: '11px', fontWeight: 700 }}
-                      >
-                        ✓ Approve &amp; Build
-                      </button>
-                      <button
-                        onClick={() => handleReject(activeProject.id)}
-                        style={{ padding: '8px 12px', background: '#e7e8eb', border: 0, borderRadius: '8px', fontSize: '11px', fontWeight: 600 }}
-                      >
-                        Revise Plan
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <div className="feature-head">
-                  <span>ENTERPRISE MODULES</span>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    <button onClick={() => viewCode(activeProject.id)}>Inspect Code ↗</button>
-                    <button
-                      onClick={() => handleDelete(activeProject.id, activeProject.name)}
-                      style={{ color: '#dc2626', border: '1px solid #fca5a5', background: '#fef2f2', borderRadius: '6px', padding: '2px 8px', fontSize: '11px' }}
-                    >
-                      Delete Build 🗑
-                    </button>
-                  </div>
-                </div>
-
-                {['RBAC Auth', 'D1 Database', 'Audit Logging', 'Rate Limiting', 'Edge CORS', 'Queues'].map((f) => (
-                  <div className="feature" key={f}>
-                    <span>{f}</span>
-                    <i className="on"><b /></i>
-                  </div>
-                ))}
-
-                {activeProject.github_repository && (
-                  <div style={{ marginTop: '16px' }}>
-                    <a
-                      href={`https://github.com/${activeProject.github_repository}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ fontSize: '12px', color: '#4262ff', fontWeight: 700, textDecoration: 'none' }}
-                    >
-                      View GitHub Repository ({activeProject.github_repository}) ↗
-                    </a>
-                  </div>
-                )}
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* Activity Feed */}
-        {view === 'activity' && (
-          <section className="activity">
-            <small>REAL-TIME TELEMETRY</small>
-            <h2>Workspace Deployment Pipeline</h2>
-            {projects.flatMap((p) => (p.latest_event ? [{ ...p.latest_event, projectName: p.name, id: p.id }] : [])).map((ev, i) => (
-              <Event
-                key={i}
-                time={new Date(ev.created_at).toLocaleTimeString()}
-                title={`${ev.projectName}: ${ev.kind}`}
-                copy={ev.detail}
-              />
-            ))}
-            {projects.length === 0 && <p style={{ color: '#788091' }}>No activity logged yet.</p>}
-          </section>
-        )}
-
-        {/* Audit View */}
-        {view === 'audit' && (
-          <section className="activity" style={{ maxWidth: '900px' }}>
-            <small>COMPLIANCE &amp; GOVERNANCE</small>
-            <h2>Immutable Audit Log</h2>
-            {auditLogs.map((log) => (
-              <Event
-                key={log.id}
-                time={new Date(log.created_at).toLocaleString()}
-                title={log.action}
-                copy={`${log.details || ''} (IP: ${log.ip_address || 'edge'})`}
-              />
-            ))}
-            {auditLogs.length === 0 && <p style={{ color: '#788091' }}>No audit events recorded yet.</p>}
-          </section>
-        )}
-      </section>
-
-      {/* Code Inspector Modal */}
-      {codeModalOpen && selectedCode && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.7)',
-            backdropFilter: 'blur(6px)',
-            display: 'grid',
-            placeItems: 'center',
-            zIndex: 100,
-            padding: '20px',
-          }}
-        >
-          <div
-            style={{
-              background: '#fff',
-              borderRadius: '16px',
-              padding: '24px',
-              maxWidth: '800px',
-              width: '100%',
-              maxHeight: '85vh',
-              overflowY: 'auto',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 800 }}>Generated Code Tree</h3>
-              <button
-                onClick={() => setCodeModalOpen(false)}
-                style={{ background: 'none', border: 0, fontSize: '18px', cursor: 'pointer' }}
-              >
-                ✕
-              </button>
-            </div>
-            <div style={{ marginBottom: '16px' }}>
-              <h4 style={{ fontSize: '12px', color: '#4262ff', margin: '0 0 6px 0' }}>src/worker.mjs (Cloudflare Worker API)</h4>
-              <pre style={{ background: '#0a0d14', color: '#8de8c5', padding: '12px', borderRadius: '8px', fontSize: '11px', overflowX: 'auto' }}>
-                <code>{selectedCode.backend || 'No worker code'}</code>
-              </pre>
-            </div>
-            <div>
-              <h4 style={{ fontSize: '12px', color: '#4262ff', margin: '0 0 6px 0' }}>schema.sql (D1 SQLite Schema)</h4>
-              <pre style={{ background: '#0a0d14', color: '#8de8c5', padding: '12px', borderRadius: '8px', fontSize: '11px', overflowX: 'auto' }}>
-                <code>{selectedCode.database || 'No database schema'}</code>
-              </pre>
-            </div>
-          </div>
-        </div>
-      )}
+      </div>}
     </main>
   );
 }
 
-function Nav(p: { label: string; text: string; active?: boolean; onClick?: () => void }) {
-  return (
-    <button className={`nav ${p.active ? 'active' : ''}`} onClick={p.onClick}>
-      <i>{p.label}</i>
-      {p.text}
-    </button>
-  );
-}
-
-function Section(p: { title: string; action: () => void }) {
-  return (
-    <div className="section-title">
-      <div>
-        <small>IN MOTION</small>
-        <h2>{p.title}</h2>
-      </div>
-      <button onClick={p.action}>View all →</button>
-    </div>
-  );
-}
-
-function Event(p: { time: string; title: string; copy: string }) {
-  return (
-    <article className="event">
-      <i />
-      <div>
-        <small>{p.time}</small>
-        <h3>{p.title}</h3>
-        <p>{p.copy}</p>
-      </div>
-      <button>•••</button>
-    </article>
-  );
-}
+const primary: React.CSSProperties = {minHeight:44,border:0,borderRadius:10,padding:'0 15px',fontWeight:800,cursor:'pointer',background:'#67d2ff',color:'#071019'};
+const ghost: React.CSSProperties = {minHeight:40,border:'1px solid #2a3340',borderRadius:9,padding:'0 12px',fontWeight:700,cursor:'pointer',background:'#11161e',color:'#c7cfda'};
+const chip: React.CSSProperties = {minHeight:36,border:'1px solid #29313e',borderRadius:999,padding:'0 11px',fontWeight:700,cursor:'pointer',color:'#cbd5e3'};
+const eyebrow: React.CSSProperties = {fontSize:10,fontWeight:900,letterSpacing:'.1em',color:'#74d8ff'};
+const label: React.CSSProperties = {fontSize:12,fontWeight:800,color:'#a8b2c0'};
+const input: React.CSSProperties = {width:'100%',boxSizing:'border-box',minHeight:44,background:'#080b10',border:'1px solid #29313e',borderRadius:10,padding:'0 12px',color:'#fff',fontSize:16};
