@@ -61,7 +61,7 @@ jobs:
             PAYLOAD="$(jq -c --arg value "$OPENROUTER_API_KEY" '. + {OPENROUTER_API_KEY:$value}' <<<"$PAYLOAD")"
             echo 'Installing OPENROUTER_API_KEY from GitHub Actions secret.'
           else
-            echo 'OPENROUTER_API_KEY is not configured; procedural builds will remain blocked until an OpenRouter key is configured.'
+            echo 'OPENROUTER_API_KEY is not configured; Workers AI remains available as the native mesh fallback.'
           fi
 
           if [ "$PAYLOAD" != '{}' ]; then
@@ -120,8 +120,9 @@ jobs:
           $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0008_enterprise_schema.sql
           $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0009_workspace_settings.sql
           $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0010_agentic_builder.sql
+          $WRANGLER d1 execute "$DB" --remote --yes --file=migrations/0011_universal_mesh.sql
 
-          $WRANGLER d1 execute "$DB" --remote --yes --command "INSERT OR IGNORE INTO d1_migrations(name) VALUES ('0001_control_plane.sql'), ('0002_oauth_connections.sql'), ('0003_build_events.sql'), ('0004_users.sql'), ('0005_scaffolding.sql'), ('0006_build_events_stage.sql'), ('0007_plan_json.sql'), ('0008_enterprise_schema.sql'), ('0009_workspace_settings.sql'), ('0010_agentic_builder.sql');"
+          $WRANGLER d1 execute "$DB" --remote --yes --command "INSERT OR IGNORE INTO d1_migrations(name) VALUES ('0001_control_plane.sql'), ('0002_oauth_connections.sql'), ('0003_build_events.sql'), ('0004_users.sql'), ('0005_scaffolding.sql'), ('0006_build_events_stage.sql'), ('0007_plan_json.sql'), ('0008_enterprise_schema.sql'), ('0009_workspace_settings.sql'), ('0010_agentic_builder.sql'), ('0011_universal_mesh.sql');"
 
       - name: Deploy Worker
         shell: bash
@@ -166,9 +167,21 @@ jobs:
           fi
           node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-health.json','utf8'));if(x.ok!==true)process.exit(1)"
 
+          root_status="$(curl -sS -o /tmp/vela-root.html -w '%{http_code}' "$BASE/")"
+          test "$root_status" = '200'
+          grep -Fq 'Click things together.' /tmp/vela-root.html
+          grep -Fq 'UNIVERSAL INTERNET MESH' /tmp/vela-root.html
+
+          ai_status="$(curl -sS -o /tmp/vela-ai.html -w '%{http_code}' "$BASE/ai")"
+          test "$ai_status" = '200'
+          grep -Fq 'AI CONNECTIONS' /tmp/vela-ai.html
+
           request session /tmp/vela-session.json -c /tmp/vela.cookies -X POST "$BASE/session"
           request connections /tmp/vela-connections.json -b /tmp/vela.cookies "$BASE/connections"
           node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-connections.json','utf8'));if(!Array.isArray(x.connections))throw new Error('connections payload invalid')"
 
-          # CI must never call /projects or another build-triggering endpoint.
-          echo 'Runtime smoke test passed without creating or deploying an application.'
+          request mesh /tmp/vela-mesh.json -b /tmp/vela.cookies "$BASE/mesh/state"
+          node -e "const x=JSON.parse(require('fs').readFileSync('/tmp/vela-mesh.json','utf8'));if(!Array.isArray(x.catalog)||!Array.isArray(x.links)||!Array.isArray(x.runs))throw new Error('mesh state payload invalid')"
+
+          # CI must never call /projects, /mesh/run, or another action-triggering endpoint.
+          echo 'Runtime smoke test passed: health, mesh UI, AI setup, session, connections, and mesh state are live.'
