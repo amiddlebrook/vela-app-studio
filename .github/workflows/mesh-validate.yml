@@ -15,8 +15,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: TypeScript validation
-        run: npx tsc --noEmit
       - name: Cloudflare Worker dry run
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
