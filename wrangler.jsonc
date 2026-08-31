@@ -21,9 +21,12 @@
   "durable_objects": {
     "bindings": [{ "name": "BUILDS", "class_name": "BuildCoordinator" }]
   },
-  "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["BuildCoordinator"] }
-  ],
+  "exports": {
+    "BuildCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "queues": {
     "producers": [{ "binding": "BUILD_JOBS", "queue": "vela-build-jobs" }],
