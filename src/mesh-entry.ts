@@ -6,15 +6,15 @@ export { BuildCoordinator };
 
 type RuntimeEnv = Parameters<typeof handleMeshRequest>[1];
 
-function enhanceMeshHome(response: Response): Promise<Response> {
-  return response.text().then((body) => {
-    const oldAiClick = "if(n.mode==='ai'){note('Open AI Toolbox settings in the legacy studio to add this provider, or use Workers AI which is native.');return}";
-    const newAiClick = "if(n.mode==='ai'){location.href='/ai?provider='+encodeURIComponent(id);return}";
-    const enhanced = body.replace(oldAiClick, newAiClick);
-    const headers = new Headers(response.headers);
-    headers.delete('content-length');
-    return new Response(enhanced, { status: response.status, statusText: response.statusText, headers });
-  });
+async function enhanceMeshHome(response: Response): Promise<Response> {
+  const body = await response.text();
+  const oldAiClick = "if(n.mode==='ai'){note('Open AI Toolbox settings in the legacy studio to add this provider, or use Workers AI which is native.');return}";
+  const newAiClick = "if(n.mode==='ai'){location.href='/ai?provider='+encodeURIComponent(id);return}";
+  const enhanced = body.replace(oldAiClick, newAiClick);
+  if (enhanced === body) throw new Error('Mesh home AI connection routing marker was not found');
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  return new Response(enhanced, { status: response.status, statusText: response.statusText, headers });
 }
 
 export default {
