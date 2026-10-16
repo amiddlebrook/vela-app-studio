@@ -169,7 +169,8 @@ jobs:
 
           root_status="$(curl -sS -o /tmp/vela-root.html -w '%{http_code}' "$BASE/")"
           test "$root_status" = '200'
-          grep -Fq 'Click things together.' /tmp/vela-root.html
+          grep -Fq 'YOUR EDGE-NATIVE AUTOMATION STUDIO' /tmp/vela-root.html
+          grep -Fq 'metric-ready' /tmp/vela-root.html
           grep -Fq 'UNIVERSAL INTERNET MESH' /tmp/vela-root.html
 
           ai_status="$(curl -sS -o /tmp/vela-ai.html -w '%{http_code}' "$BASE/ai")"
