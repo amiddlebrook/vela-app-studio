@@ -6,10 +6,12 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
+    "dev": "wrangler dev",
     "build": "vinext build",
     "start": "vinext start",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "dev:legacy": "vinext dev",
+    "verify:mesh": "node tests/mesh-contract.mjs"
   },
   "dependencies": {
     "agents": "^0.21.0",
