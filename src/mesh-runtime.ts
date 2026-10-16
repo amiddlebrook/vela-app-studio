@@ -369,7 +369,8 @@ async function workspaceAI(env: MeshEnv, ownerId: string, prompt: string): Promi
   if (env.DB) settings = await env.DB.prepare('SELECT * FROM workspace_settings WHERE owner_id=?').bind(ownerId).first<any>();
   const tryDecrypt = async (value: string | null | undefined) => value ? await decryptSecret(value, env).catch(() => '') : '';
   const active = String(settings?.active_provider || 'auto');
-  const order = active !== 'auto' ? [active, 'openrouter', 'workers-ai'] : ['openrouter', 'workers-ai', 'openai', 'anthropic', 'gemini'];
+  // Free-tier inference only: explicit OpenRouter usage must also select a :free model.
+  const order = active === 'openrouter' ? ['openrouter', 'workers-ai'] : ['workers-ai', 'openrouter'];
   const seen = new Set<string>();
   for (const provider of order) {
     if (seen.has(provider)) continue;
@@ -378,13 +379,18 @@ async function workspaceAI(env: MeshEnv, ownerId: string, prompt: string): Promi
       if (provider === 'openrouter') {
         const key = await tryDecrypt(settings?.openrouter_key_ciphertext) || env.OPENROUTER_API_KEY || '';
         if (!key) continue;
-        const model = settings?.openrouter_model || env.OPENROUTER_MODEL || 'openai/gpt-oss-120b';
+        const model = String(settings?.openrouter_model || env.OPENROUTER_MODEL || 'z-ai/glm-5.2:free');
+        if (!model.endsWith(':free')) continue;
         const body = await requestJson('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.2 }) });
-        return String(body.choices?.[0]?.message?.content || '');
+        const answer = String(body.choices?.[0]?.message?.content || '').trim();
+        if (answer) return answer;
+        continue;
       }
       if (provider === 'workers-ai' && env.AI) {
         const result = await env.AI.run((settings?.cf_ai_model || '@cf/meta/llama-3.1-8b-instruct-fast') as any, { messages: [{ role: 'user', content: prompt }], max_tokens: 1800 } as any) as any;
-        return String(result?.response || result || '');
+        const answer = typeof result?.response === 'string' ? result.response.trim() : '';
+        if (answer) return answer;
+        continue;
       }
       if (provider === 'openai') {
         const key = await tryDecrypt(settings?.openai_key_ciphertext) || env.OPENAI_API_KEY || '';
@@ -409,7 +415,7 @@ async function workspaceAI(env: MeshEnv, ownerId: string, prompt: string): Promi
       console.warn(JSON.stringify({ event: 'mesh_ai_provider_failed', provider, reason: error instanceof Error ? error.message : String(error) }));
     }
   }
-  return JSON.stringify({ note: 'No AI provider was available; source data passed through unchanged.', prompt: prompt.slice(0, 1200) });
+  throw new Error('No free AI inference is available. Check the Cloudflare Workers AI binding or configure an OpenRouter :free model.');
 }
 
 async function deliverNode(env: MeshEnv, ownerId: string, nodeId: string, payload: string, capabilities: string[]): Promise<any> {
