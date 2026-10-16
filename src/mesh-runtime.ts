@@ -286,7 +286,36 @@ async function requestJson(url: string, init: RequestInit = {}): Promise<any> {
 }
 
 async function observeNode(env: MeshEnv, ownerId: string, nodeId: string, goal: string): Promise<any> {
-  if (nodeId === 'crawler') return { goal, note: 'Crawler needs a URL configured on the link or Webhook/API node.' };
+  if (nodeId === 'crawler') {
+    const found = goal.match(/https:\/\/[^\s<>"']+/i);
+    if (!found) throw new Error('Web Crawler needs a public HTTPS URL in the workspace goal.');
+    const target = new URL(found[0].replace(/[.,;!?]+$/, ''));
+    if (target.username || target.password || target.port || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(target.hostname) || /(^|\.)localhost$|(^|\.)local$|(^|\.)internal$|(^|\.)example$|(^|\.)test$|(^|\.)invalid$|\.workers\.dev$/i.test(target.hostname)) throw new Error('Crawler only supports public HTTPS websites without custom ports.');
+    const response = await fetch(target.toString(), { redirect: 'error', headers: { accept: 'text/html' }, signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error('Crawler received HTTP ' + response.status);
+    if (!String(response.headers.get('content-type') || '').includes('text/html')) throw new Error('Crawler expects a public HTML page');
+    if (Number(response.headers.get('content-length') || '0') > 300000) throw new Error('Page exceeds the crawler size limit');
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('Page has no readable response body');
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      while (size < 180000) {
+        const next = await reader.read();
+        if (next.done) break;
+        const chunk = next.value.slice(0, 180000 - size);
+        chunks.push(chunk); size += chunk.byteLength;
+      }
+    } finally { await reader.cancel().catch(() => undefined); }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const page = decoder.decode(bytes);
+    const title = page.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/<[^>]+>/g, '').trim() || null;
+    const description = page.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)/i)?.[1] || null;
+    const excerpt = page.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 7500);
+    return { url: target.toString(), fetchedAt: new Date().toISOString(), title, description, excerpt, truncated: size >= 180000 };
+  }
   if (nodeId === 'github') {
     const token = await existingProviderToken(env, ownerId, 'github');
     return requestJson('https://api.github.com/user/repos?per_page=20&sort=updated', { headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'user-agent': 'Vela-Mesh', 'x-github-api-version': '2022-11-28' } });
@@ -340,7 +369,8 @@ async function workspaceAI(env: MeshEnv, ownerId: string, prompt: string): Promi
   if (env.DB) settings = await env.DB.prepare('SELECT * FROM workspace_settings WHERE owner_id=?').bind(ownerId).first<any>();
   const tryDecrypt = async (value: string | null | undefined) => value ? await decryptSecret(value, env).catch(() => '') : '';
   const active = String(settings?.active_provider || 'auto');
-  const order = active !== 'auto' ? [active, 'openrouter', 'workers-ai'] : ['openrouter', 'workers-ai', 'openai', 'anthropic', 'gemini'];
+  // Free-tier inference only: explicit OpenRouter usage must also select a :free model.
+  const order = active === 'openrouter' ? ['openrouter', 'workers-ai'] : ['workers-ai', 'openrouter'];
   const seen = new Set<string>();
   for (const provider of order) {
     if (seen.has(provider)) continue;
@@ -349,13 +379,18 @@ async function workspaceAI(env: MeshEnv, ownerId: string, prompt: string): Promi
       if (provider === 'openrouter') {
         const key = await tryDecrypt(settings?.openrouter_key_ciphertext) || env.OPENROUTER_API_KEY || '';
         if (!key) continue;
-        const model = settings?.openrouter_model || env.OPENROUTER_MODEL || 'openai/gpt-oss-120b';
+        const model = String(settings?.openrouter_model || env.OPENROUTER_MODEL || 'z-ai/glm-5.2:free');
+        if (!model.endsWith(':free')) continue;
         const body = await requestJson('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.2 }) });
-        return String(body.choices?.[0]?.message?.content || '');
+        const answer = String(body.choices?.[0]?.message?.content || '').trim();
+        if (answer) return answer;
+        continue;
       }
       if (provider === 'workers-ai' && env.AI) {
         const result = await env.AI.run((settings?.cf_ai_model || '@cf/meta/llama-3.1-8b-instruct-fast') as any, { messages: [{ role: 'user', content: prompt }], max_tokens: 1800 } as any) as any;
-        return String(result?.response || result || '');
+        const answer = typeof result?.response === 'string' ? result.response.trim() : '';
+        if (answer) return answer;
+        continue;
       }
       if (provider === 'openai') {
         const key = await tryDecrypt(settings?.openai_key_ciphertext) || env.OPENAI_API_KEY || '';
@@ -380,7 +415,7 @@ async function workspaceAI(env: MeshEnv, ownerId: string, prompt: string): Promi
       console.warn(JSON.stringify({ event: 'mesh_ai_provider_failed', provider, reason: error instanceof Error ? error.message : String(error) }));
     }
   }
-  return JSON.stringify({ note: 'No AI provider was available; source data passed through unchanged.', prompt: prompt.slice(0, 1200) });
+  throw new Error('No free AI inference is available. Check the Cloudflare Workers AI binding or configure an OpenRouter :free model.');
 }
 
 async function deliverNode(env: MeshEnv, ownerId: string, nodeId: string, payload: string, capabilities: string[]): Promise<any> {
